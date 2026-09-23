@@ -46,6 +46,15 @@ class Settings(BaseSettings):
     DB_MAX_OVERFLOW: int = 10
     DB_POOL_RECYCLE: int = 3600
 
+    # ---------- 认证（由 system 模块实现登录 / 鉴权时使用） ----------
+    # 生产环境必须通过 .env 覆盖 SECRET_KEY，不要使用默认值
+    SECRET_KEY: str = "bh-erp-dev-secret-change-me"
+    """签发访问令牌用的密钥。"""
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 480
+    """访问令牌有效期（分钟）。"""
+    PASSWORD_HASH_ITERATIONS: int = 120_000
+    """密码哈希迭代次数（PBKDF2-HMAC-SHA256）。"""
+
     @property
     def database_url(self) -> str:
         """SQLAlchemy 连接串（PyMySQL 驱动）。"""
