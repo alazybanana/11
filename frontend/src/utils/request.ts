@@ -2,7 +2,8 @@ import axios from 'axios'
 import type { AxiosError, AxiosInstance, AxiosRequestConfig, AxiosResponse } from 'axios'
 
 import type { ApiResponse } from '@/types/api'
-import { SUCCESS_CODE } from '@/types/api'
+import { SUCCESS_CODE, UNAUTHORIZED_CODE } from '@/types/api'
+import { clearAuth, getToken } from '@/utils/token'
 
 /**
  * 全局 axios 实例。
@@ -37,6 +38,15 @@ function toErrorMessage(error: AxiosError<ApiResponse<unknown>>): string {
   return error.response ? `请求失败（HTTP ${error.response.status}）` : error.message
 }
 
+/** 自动附带登录令牌：`Authorization: Bearer <token>` */
+request.interceptors.request.use((config) => {
+  const token = getToken()
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`
+  }
+  return config
+})
+
 request.interceptors.response.use(undefined, (error: AxiosError<ApiResponse<unknown>>) =>
   Promise.reject(new Error(toErrorMessage(error))),
 )
@@ -52,13 +62,25 @@ async function unwrap<T>(promise: Promise<AxiosResponse<ApiResponse<T>>>): Promi
   }
 
   if (body.code !== SUCCESS_CODE) {
+    // 登录态已失效：清掉本地令牌并回到登录页（用 location 避免与 router 循环依赖）
+    if (body.code === UNAUTHORIZED_CODE) {
+      clearAuth()
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login'
+      }
+    }
     throw new Error(body.message || '请求失败')
   }
 
   return body.data
 }
 
-export function get<T>(url: string, params?: Record<string, unknown>): Promise<T> {
+/**
+ * GET 请求。`params` 用 `object` 而非 `Record<string, unknown>`：
+ * TypeScript 的 interface 没有隐式索引签名，写 `Record<string, unknown>`
+ * 会导致各模块自己的查询参数 interface（如 `MaterialQuery`）传不进来。
+ */
+export function get<T>(url: string, params?: object): Promise<T> {
   return unwrap<T>(request.get(url, { params }))
 }
 

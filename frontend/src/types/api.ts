@@ -32,3 +32,6 @@ export interface HealthData {
 
 /** 成功状态码，与后端一致 */
 export const SUCCESS_CODE = 0
+
+/** 未登录 / 登录已过期的错误码，与 system 模块 errors.py 一致 */
+export const UNAUTHORIZED_CODE = 1104
