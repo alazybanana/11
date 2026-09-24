@@ -261,12 +261,6 @@ export const constantRoutes: RouteRecordRaw[] = [
         component: () => import('@/views/system/log/index.vue'),
         meta: { title: '操作日志' },
       },
-      {
-        path: 'system/course-import',
-        name: 'SystemCourseImport',
-        component: () => import('@/views/system/course-import/index.vue'),
-        meta: { title: '课程数据导入' },
-      },
     ],
   },
 
