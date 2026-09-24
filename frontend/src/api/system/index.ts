@@ -273,7 +273,7 @@ export function listRegisterRoles(): Promise<Role[]> {
   return get<Role[]>('/system/auth/register-roles')
 }
 
-/** 注册账号：选择部门 + 自选一种或多种身份（九种身份可复选），工号留空自动生成 */
+/** 注册账号：选择部门 + 选择一种身份（九选一），工号留空自动生成 */
 export function register(payload: {
   username: string
   password: string

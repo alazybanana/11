@@ -22,7 +22,7 @@ const form = reactive({
   password2: '',
   employee_no: '',
   org_id: undefined as number | undefined,
-  role_ids: [] as number[],
+  role_id: undefined as number | undefined,
 })
 
 const rules: FormRules = {
@@ -42,9 +42,7 @@ const rules: FormRules = {
     },
   ],
   org_id: [{ required: true, message: '请选择所属部门', trigger: 'change' }],
-  role_ids: [
-    { required: true, type: 'array', min: 1, message: '请至少选择一种身份', trigger: 'change' },
-  ],
+  role_id: [{ required: true, message: '请选择身份', trigger: 'change' }],
 }
 
 /** 部门下拉数据源：组织树扁平化 + 关键字过滤（与「员工管理」页保持一致） */
@@ -78,7 +76,7 @@ async function submit(): Promise<void> {
       display_name: form.display_name,
       org_id: form.org_id as number,
       employee_no: form.employee_no.trim() || undefined,
-      role_ids: form.role_ids,
+      role_ids: [form.role_id as number],
     })
     ElMessage.success('注册成功，请使用新账号登录')
     router.replace({ path: '/login', query: { username: form.username } })
@@ -137,18 +135,18 @@ async function submit(): Promise<void> {
             show-password
           />
         </el-form-item>
-        <el-form-item label="选择身份" prop="role_ids">
-          <el-checkbox-group v-model="form.role_ids" class="register-page__roles">
-            <el-checkbox
+        <el-form-item label="选择身份" prop="role_id">
+          <el-select v-model="form.role_id" placeholder="选择你的身份" size="large" class="register-page__org">
+            <el-option
               v-for="role in roleOptions"
               :key="role.id"
+              :label="role.role_name"
               :value="role.id"
-              class="register-page__role"
             >
               <div class="register-page__role-name">{{ role.role_name }}</div>
               <div v-if="role.description" class="register-page__role-desc">{{ role.description }}</div>
-            </el-checkbox>
-          </el-checkbox-group>
+            </el-option>
+          </el-select>
         </el-form-item>
         <el-button
           class="register-page__button"
@@ -192,19 +190,6 @@ async function submit(): Promise<void> {
 
 .register-page__org {
   width: 100%;
-}
-
-.register-page__roles {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  width: 100%;
-}
-
-.register-page__role {
-  height: auto;
-  align-items: flex-start;
-  margin-right: 0;
 }
 
 .register-page__role-name {
