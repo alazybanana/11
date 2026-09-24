@@ -340,6 +340,19 @@ def get_personnel_by_no(db: Session, employee_no: str) -> Optional[models.SysPer
     )
 
 
+def next_employee_no(db: Session) -> str:
+    """自动生成工号：EMP + 表内最大 id+1 补 5 位。
+
+    基于 id 递增（删除工号后 id 不回用），并循环探测唯一键避免与手工工号撞号。
+    """
+    max_id = db.scalar(select(func.max(models.SysPersonnel.id))) or 0
+    for offset in range(1, 101):
+        candidate = f"EMP{int(max_id) + offset:05d}"
+        if not get_personnel_by_no(db, candidate):
+            return candidate
+    raise RuntimeError("无法生成唯一员工工号")
+
+
 def add_personnel(db: Session, personnel: models.SysPersonnel) -> models.SysPersonnel:
     db.add(personnel)
     db.flush()

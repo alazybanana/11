@@ -13,7 +13,7 @@
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -1030,6 +1030,11 @@ def update_personnel(
         _validate_status(data["status"])
     for field, value in data.items():
         setattr(personnel, field, value)
+    # 姓名联动：修改员工姓名时，同步其登录账号（1:1 关联）的显示名
+    if "person_name" in data:
+        user = repo.get_user_by_personnel(db, personnel.id)
+        if user:
+            user.display_name = data["person_name"]
     log_operation(
         db,
         module="system",
@@ -1510,18 +1515,44 @@ def login(db: Session, username: str, password: str) -> Dict[str, object]:
 
 
 def register(db: Session, payload: RegisterIn) -> models.SysUser:
-    """公开注册：创建 ACTIVE 账号并绑定所选身份角色（九种身份可复选）。"""
+    """公开注册：创建员工档案（部门+工号）与登录账号，绑定所选身份角色。
+
+    一条注册动作串联 组织 → 员工 → 账号 → 角色 → 权限 全链路，
+    数据一致性与系统管理「员工/账号」创建路径保持一致。
+    """
     if repo.get_user_by_username(db, payload.username):
         raise BusinessException(CODE_CODE_EXISTS, "登录名已存在")
     role_ids = list(dict.fromkeys(int(i) for i in payload.role_ids))
     for role_id in role_ids:
         if not repo.get_role(db, role_id):
             raise BusinessException(CODE_NOT_FOUND, f"身份角色不存在：{role_id}")
+    if not repo.get_organization(db, payload.org_id):
+        raise BusinessException(CODE_NOT_FOUND, "所属组织/部门不存在")
+
+    # 工号：留空自动生成 EMP+序号，手工填写则校验唯一
+    employee_no = (payload.employee_no or "").strip()
+    if employee_no:
+        if repo.get_personnel_by_no(db, employee_no):
+            raise BusinessException(CODE_EMPLOYEE_NO_EXISTS, "员工工号已存在")
+    else:
+        employee_no = repo.next_employee_no(db)
+
+    # 先建员工档案，再建账号并挂 1:1 关联
+    personnel = models.SysPersonnel(
+        employee_no=employee_no,
+        person_name=payload.display_name,
+        org_id=payload.org_id,
+        status=RecordStatus.ACTIVE.value,
+        hire_date=date.today(),
+    )
+    repo.add_personnel(db, personnel)
+    db.flush()
 
     user = models.SysUser(
         username=payload.username,
         password_hash=_hash_password(payload.password),
         display_name=payload.display_name,
+        personnel_id=personnel.id,
         status=RecordStatus.ACTIVE.value,
     )
     repo.add_user(db, user)
@@ -1534,7 +1565,10 @@ def register(db: Session, payload: RegisterIn) -> models.SysUser:
         action="REGISTER",
         target_type="sys_user",
         target_id=user.id,
-        detail=f"用户 {user.username} 注册，身份角色 {role_ids}",
+        detail=(
+            f"用户 {user.username} 注册：员工 {employee_no}，部门 {payload.org_id}，"
+            f"身份角色 {role_ids}"
+        ),
     )
     return user
 
