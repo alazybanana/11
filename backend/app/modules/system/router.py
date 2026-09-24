@@ -36,8 +36,19 @@ from app.common.response import ApiResponse, success
 from app.core.database import get_db
 from app.modules.system import errors, schemas, service
 from app.modules.system.enums import BomType
-from app.modules.system.deps import CurrentUser, client_ip, get_current_user, operation_log
+from app.modules.system.deps import (
+    CurrentUser,
+    client_ip,
+    get_current_user,
+    operation_log,
+    require_permission,
+)
 
+
+# 权限码速查（与 seed.py 的权限资源树一致）：
+#   功能码（MENU）= 查看（列表 / 详情 / 展开）
+#   `功能码:manage`（BUTTON）= 新增 / 修改 / 删除等写操作
+#   system:user:approve / assign / reset、system:role:assign、system:log:clear = 高危操作
 router = APIRouter(tags=["system"])
 
 # 需要登录才能访问的子路由集合（`/health` 与 `/auth/login` 不在此列）
@@ -71,15 +82,23 @@ def register_crud(
     create_schema: Type[BaseModel],
     update_schema: Type[BaseModel],
     out_schema: Type[BaseModel],
+    view_code: str | None = None,
+    manage_code: str | None = None,
 ) -> None:
-    """为一个实体注册标准的增删查改路由（不含列表查询，列表由各实体单独定义筛选条件）。"""
+    """为一个实体注册标准的增删查改路由（不含列表查询，列表由各实体单独定义筛选条件）。
+
+    - `view_code`：查看（详情）所需的权限编码，缺省只要求登录；
+    - `manage_code`：新增 / 修改 / 删除所需的权限编码，缺省只要求登录。
+    """
+    view_deps = [Depends(require_permission(view_code))] if view_code else []
+    write_deps = [Depends(require_permission(manage_code))] if manage_code else []
 
     @sub.post(
         path,
         response_model=ApiResponse[out_schema],
         summary=f"新增{label}",
         operation_id=f"create_{key}",
-        dependencies=[Depends(operation_log("system", "CREATE", f"新增{label}"))],
+        dependencies=[Depends(operation_log("system", "CREATE", f"新增{label}")), *write_deps],
     )
     def create_item(payload: create_schema, db: Session = Depends(get_db)) -> Any:  # type: ignore[valid-type]
         return success(service_cls(db).create(payload))
@@ -89,6 +108,7 @@ def register_crud(
         response_model=ApiResponse[out_schema],
         summary=f"{label}详情",
         operation_id=f"get_{key}",
+        dependencies=view_deps,
     )
     def get_item(item_id: int, db: Session = Depends(get_db)) -> Any:
         return success(service_cls(db).detail(item_id))
@@ -98,7 +118,7 @@ def register_crud(
         response_model=ApiResponse[out_schema],
         summary=f"修改{label}",
         operation_id=f"update_{key}",
-        dependencies=[Depends(operation_log("system", "UPDATE", f"修改{label}"))],
+        dependencies=[Depends(operation_log("system", "UPDATE", f"修改{label}")), *write_deps],
     )
     def update_item(item_id: int, payload: update_schema, db: Session = Depends(get_db)) -> Any:  # type: ignore[valid-type]
         return success(service_cls(db).update(item_id, payload))
@@ -108,7 +128,7 @@ def register_crud(
         response_model=ApiResponse[out_schema],
         summary=f"局部修改{label}",
         operation_id=f"patch_{key}",
-        dependencies=[Depends(operation_log("system", "UPDATE", f"局部修改{label}"))],
+        dependencies=[Depends(operation_log("system", "UPDATE", f"局部修改{label}")), *write_deps],
     )
     def patch_item(item_id: int, payload: update_schema, db: Session = Depends(get_db)) -> Any:  # type: ignore[valid-type]
         return success(service_cls(db).update(item_id, payload))
@@ -118,7 +138,7 @@ def register_crud(
         response_model=ApiResponse[None],
         summary=f"删除{label}",
         operation_id=f"delete_{key}",
-        dependencies=[Depends(operation_log("system", "DELETE", f"删除{label}"))],
+        dependencies=[Depends(operation_log("system", "DELETE", f"删除{label}")), *write_deps],
     )
     def delete_item(item_id: int, db: Session = Depends(get_db)) -> Any:
         service_cls(db).delete(item_id)
@@ -133,6 +153,7 @@ def register_crud(
     response_model=ApiResponse[PageData[schemas.MaterialOut]],
     summary="物料分页查询",
     operation_id="list_materials",
+    dependencies=[Depends(require_permission("system:material"))],
 )
 def list_materials(
     params: PageParams = Depends(PageParams.as_dependency),
@@ -166,6 +187,8 @@ register_crud(
     create_schema=schemas.MaterialCreate,
     update_schema=schemas.MaterialUpdate,
     out_schema=schemas.MaterialOut,
+    view_code="system:material",
+    manage_code="system:material:manage",
 )
 
 
@@ -181,6 +204,7 @@ register_crud(
     response_model=ApiResponse[PageData[schemas.BomOut]],
     summary="BOM 分页查询",
     operation_id="list_boms",
+    dependencies=[Depends(require_permission("system:bom"))],
 )
 def list_boms(
     params: PageParams = Depends(PageParams.as_dependency),
@@ -210,6 +234,7 @@ def list_boms(
     response_model=ApiResponse[schemas.BomTreeNode],
     summary="多层 BOM 树形展开（层数不限）",
     operation_id="get_bom_tree",
+    dependencies=[Depends(require_permission("system:bom"))],
 )
 def get_bom_tree(
     material_id: int = Query(..., description="要展开的物料 ID（通常是成品）"),
@@ -229,6 +254,7 @@ def get_bom_tree(
     response_model=ApiResponse[list[schemas.BomTreeNode]],
     summary="多层 BOM 展开成一维用料清单（虚拟件穿透）",
     operation_id="get_bom_flat_lines",
+    dependencies=[Depends(require_permission("system:bom"))],
 )
 def get_bom_flat_lines(
     material_id: int = Query(..., description="要展开的物料 ID（通常是成品）"),
@@ -248,6 +274,7 @@ def get_bom_flat_lines(
     response_model=ApiResponse[schemas.BomDetailOut],
     summary="BOM 详情（含行明细）",
     operation_id="get_bom_detail",
+    dependencies=[Depends(require_permission("system:bom"))],
 )
 def get_bom_detail(bom_id: int, db: Session = Depends(get_db)) -> Any:
     return success(service.BomService(db).detail_with_lines(bom_id))
@@ -258,6 +285,7 @@ def get_bom_detail(bom_id: int, db: Session = Depends(get_db)) -> Any:
     response_model=ApiResponse[list[schemas.BomLineOut]],
     summary="BOM 行列表",
     operation_id="list_bom_lines",
+    dependencies=[Depends(require_permission("system:bom"))],
 )
 def list_bom_lines(bom_id: int, db: Session = Depends(get_db)) -> Any:
     return success(service.BomService(db).list_lines(bom_id))
@@ -268,7 +296,10 @@ def list_bom_lines(bom_id: int, db: Session = Depends(get_db)) -> Any:
     response_model=ApiResponse[schemas.BomLineOut],
     summary="新增 BOM 行",
     operation_id="create_bom_line",
-    dependencies=[Depends(operation_log("system", "CREATE", "新增 BOM 行"))],
+    dependencies=[
+        Depends(operation_log("system", "CREATE", "新增 BOM 行")),
+        Depends(require_permission("system:bom:manage")),
+    ],
 )
 def create_bom_line(bom_id: int, payload: schemas.BomLineCreate, db: Session = Depends(get_db)) -> Any:
     return success(service.BomService(db).add_line(bom_id, payload))
@@ -279,7 +310,10 @@ def create_bom_line(bom_id: int, payload: schemas.BomLineCreate, db: Session = D
     response_model=ApiResponse[schemas.BomLineOut],
     summary="修改 BOM 行",
     operation_id="update_bom_line",
-    dependencies=[Depends(operation_log("system", "UPDATE", "修改 BOM 行"))],
+    dependencies=[
+        Depends(operation_log("system", "UPDATE", "修改 BOM 行")),
+        Depends(require_permission("system:bom:manage")),
+    ],
 )
 def update_bom_line(
     bom_id: int, line_id: int, payload: schemas.BomLineUpdate, db: Session = Depends(get_db)
@@ -292,7 +326,10 @@ def update_bom_line(
     response_model=ApiResponse[None],
     summary="删除 BOM 行",
     operation_id="delete_bom_line",
-    dependencies=[Depends(operation_log("system", "DELETE", "删除 BOM 行"))],
+    dependencies=[
+        Depends(operation_log("system", "DELETE", "删除 BOM 行")),
+        Depends(require_permission("system:bom:manage")),
+    ],
 )
 def delete_bom_line(bom_id: int, line_id: int, db: Session = Depends(get_db)) -> Any:
     service.BomService(db).delete_line(bom_id, line_id)
@@ -308,6 +345,8 @@ register_crud(
     create_schema=schemas.BomCreate,
     update_schema=schemas.BomUpdate,
     out_schema=schemas.BomOut,
+    view_code="system:bom",
+    manage_code="system:bom:manage",
 )
 
 
@@ -319,6 +358,7 @@ register_crud(
     response_model=ApiResponse[PageData[schemas.RoutingOut]],
     summary="工艺路线分页查询",
     operation_id="list_routings",
+    dependencies=[Depends(require_permission("system:routing"))],
 )
 def list_routings(
     params: PageParams = Depends(PageParams.as_dependency),
@@ -341,6 +381,7 @@ def list_routings(
     response_model=ApiResponse[schemas.RoutingDetailOut],
     summary="工艺路线详情（含工序）",
     operation_id="get_routing_detail",
+    dependencies=[Depends(require_permission("system:routing"))],
 )
 def get_routing_detail(routing_id: int, db: Session = Depends(get_db)) -> Any:
     return success(service.RoutingService(db).detail_with_steps(routing_id))
@@ -351,6 +392,7 @@ def get_routing_detail(routing_id: int, db: Session = Depends(get_db)) -> Any:
     response_model=ApiResponse[list[schemas.RoutingStepOut]],
     summary="工序列表",
     operation_id="list_routing_steps",
+    dependencies=[Depends(require_permission("system:routing"))],
 )
 def list_routing_steps(routing_id: int, db: Session = Depends(get_db)) -> Any:
     return success(service.RoutingService(db).list_steps(routing_id))
@@ -361,7 +403,10 @@ def list_routing_steps(routing_id: int, db: Session = Depends(get_db)) -> Any:
     response_model=ApiResponse[schemas.RoutingStepOut],
     summary="新增工序",
     operation_id="create_routing_step",
-    dependencies=[Depends(operation_log("system", "CREATE", "新增工序"))],
+    dependencies=[
+        Depends(operation_log("system", "CREATE", "新增工序")),
+        Depends(require_permission("system:routing:manage")),
+    ],
 )
 def create_routing_step(
     routing_id: int, payload: schemas.RoutingStepCreate, db: Session = Depends(get_db)
@@ -374,7 +419,10 @@ def create_routing_step(
     response_model=ApiResponse[schemas.RoutingStepOut],
     summary="修改工序",
     operation_id="update_routing_step",
-    dependencies=[Depends(operation_log("system", "UPDATE", "修改工序"))],
+    dependencies=[
+        Depends(operation_log("system", "UPDATE", "修改工序")),
+        Depends(require_permission("system:routing:manage")),
+    ],
 )
 def update_routing_step(
     routing_id: int, step_id: int, payload: schemas.RoutingStepUpdate, db: Session = Depends(get_db)
@@ -387,7 +435,10 @@ def update_routing_step(
     response_model=ApiResponse[None],
     summary="删除工序",
     operation_id="delete_routing_step",
-    dependencies=[Depends(operation_log("system", "DELETE", "删除工序"))],
+    dependencies=[
+        Depends(operation_log("system", "DELETE", "删除工序")),
+        Depends(require_permission("system:routing:manage")),
+    ],
 )
 def delete_routing_step(routing_id: int, step_id: int, db: Session = Depends(get_db)) -> Any:
     service.RoutingService(db).delete_step(routing_id, step_id)
@@ -403,6 +454,8 @@ register_crud(
     create_schema=schemas.RoutingCreate,
     update_schema=schemas.RoutingUpdate,
     out_schema=schemas.RoutingOut,
+    view_code="system:routing",
+    manage_code="system:routing:manage",
 )
 
 
@@ -414,6 +467,7 @@ register_crud(
     response_model=ApiResponse[list[schemas.OrganizationTreeOut]],
     summary="组织结构树",
     operation_id="get_organization_tree",
+    dependencies=[Depends(require_permission("system:org"))],
 )
 def get_organization_tree(
     keyword: str | None = Query(None, description="按编码 / 名称 / 负责人模糊查询"),
@@ -427,6 +481,7 @@ def get_organization_tree(
     response_model=ApiResponse[PageData[schemas.OrganizationOut]],
     summary="组织分页查询",
     operation_id="list_organizations",
+    dependencies=[Depends(require_permission("system:org"))],
 )
 def list_organizations(
     params: PageParams = Depends(PageParams.as_dependency),
@@ -454,6 +509,8 @@ register_crud(
     create_schema=schemas.OrganizationCreate,
     update_schema=schemas.OrganizationUpdate,
     out_schema=schemas.OrganizationOut,
+    view_code="system:org",
+    manage_code="system:org:manage",
 )
 
 
@@ -462,6 +519,7 @@ register_crud(
     response_model=ApiResponse[PageData[schemas.EmployeeOut]],
     summary="人员分页查询",
     operation_id="list_employees",
+    dependencies=[Depends(require_permission("system:org"))],
 )
 def list_employees(
     params: PageParams = Depends(PageParams.as_dependency),
@@ -486,6 +544,8 @@ register_crud(
     create_schema=schemas.EmployeeCreate,
     update_schema=schemas.EmployeeUpdate,
     out_schema=schemas.EmployeeOut,
+    view_code="system:org",
+    manage_code="system:org:manage",
 )
 
 
@@ -497,6 +557,7 @@ register_crud(
     response_model=ApiResponse[PageData[schemas.DictionaryTypeOut]],
     summary="字典类型分页查询",
     operation_id="list_dictionary_types",
+    dependencies=[Depends(require_permission("system:dictionary"))],
 )
 def list_dictionary_types(
     params: PageParams = Depends(PageParams.as_dependency),
@@ -520,6 +581,8 @@ register_crud(
     create_schema=schemas.DictionaryTypeCreate,
     update_schema=schemas.DictionaryTypeUpdate,
     out_schema=schemas.DictionaryTypeOut,
+    view_code="system:dictionary",
+    manage_code="system:dictionary:manage",
 )
 
 
@@ -528,6 +591,7 @@ register_crud(
     response_model=ApiResponse[PageData[schemas.DictionaryItemOut]],
     summary="字典项分页查询",
     operation_id="list_dictionary_items",
+    dependencies=[Depends(require_permission("system:dictionary"))],
 )
 def list_dictionary_items(
     params: PageParams = Depends(PageParams.as_dependency),
@@ -548,7 +612,10 @@ def list_dictionary_items(
     response_model=ApiResponse[schemas.DictionaryItemOut],
     summary="新增字典项",
     operation_id="create_dictionary_item",
-    dependencies=[Depends(operation_log("system", "CREATE", "新增字典项"))],
+    dependencies=[
+        Depends(operation_log("system", "CREATE", "新增字典项")),
+        Depends(require_permission("system:dictionary:manage")),
+    ],
 )
 def create_dictionary_item(
     type_id: int, payload: schemas.DictionaryItemCreate, db: Session = Depends(get_db)
@@ -561,7 +628,10 @@ def create_dictionary_item(
     response_model=ApiResponse[schemas.DictionaryItemOut],
     summary="修改字典项",
     operation_id="update_dictionary_item",
-    dependencies=[Depends(operation_log("system", "UPDATE", "修改字典项"))],
+    dependencies=[
+        Depends(operation_log("system", "UPDATE", "修改字典项")),
+        Depends(require_permission("system:dictionary:manage")),
+    ],
 )
 def update_dictionary_item(
     item_id: int, payload: schemas.DictionaryItemUpdate, db: Session = Depends(get_db)
@@ -574,7 +644,10 @@ def update_dictionary_item(
     response_model=ApiResponse[None],
     summary="删除字典项",
     operation_id="delete_dictionary_item",
-    dependencies=[Depends(operation_log("system", "DELETE", "删除字典项"))],
+    dependencies=[
+        Depends(operation_log("system", "DELETE", "删除字典项")),
+        Depends(require_permission("system:dictionary:manage")),
+    ],
 )
 def delete_dictionary_item(item_id: int, db: Session = Depends(get_db)) -> Any:
     service.DictionaryItemService(db).delete_item(item_id)
@@ -705,6 +778,7 @@ def change_password(
     response_model=ApiResponse[PageData[schemas.UserOut]],
     summary="账号分页查询",
     operation_id="list_users",
+    dependencies=[Depends(require_permission("system:user"))],
 )
 def list_users(
     params: PageParams = Depends(PageParams.as_dependency),
@@ -734,7 +808,10 @@ def list_users(
     response_model=ApiResponse[schemas.UserOut],
     summary="分配用户角色",
     operation_id="assign_user_roles",
-    dependencies=[Depends(operation_log("system", "UPDATE", "分配用户角色"))],
+    dependencies=[
+        Depends(operation_log("system", "UPDATE", "分配用户角色")),
+        Depends(require_permission("system:user:assign")),
+    ],
 )
 def assign_user_roles(
     user_id: int, payload: schemas.UserRoleAssign, db: Session = Depends(get_db)
@@ -747,10 +824,13 @@ def assign_user_roles(
     response_model=ApiResponse[schemas.UserOut],
     summary="批准注册账号",
     operation_id="approve_user",
-    dependencies=[Depends(operation_log("system", "UPDATE", "批准注册账号"))],
+    dependencies=[
+        Depends(operation_log("system", "UPDATE", "批准注册账号")),
+        Depends(require_permission("system:user:approve")),
+    ],
 )
 def approve_user(user_id: int, current_user: CurrentUser, db: Session = Depends(get_db)) -> Any:
-    """人事主管（或超管）批准注册账号，所选角色权限自此生效。"""
+    """管理人员（或超管）批准注册账号，所选角色权限自此生效。"""
     return success(service.UserService(db).approve_user(user_id, current_user))
 
 
@@ -759,10 +839,13 @@ def approve_user(user_id: int, current_user: CurrentUser, db: Session = Depends(
     response_model=ApiResponse[schemas.UserOut],
     summary="驳回注册账号",
     operation_id="reject_user",
-    dependencies=[Depends(operation_log("system", "UPDATE", "驳回注册账号"))],
+    dependencies=[
+        Depends(operation_log("system", "UPDATE", "驳回注册账号")),
+        Depends(require_permission("system:user:approve")),
+    ],
 )
 def reject_user(user_id: int, current_user: CurrentUser, db: Session = Depends(get_db)) -> Any:
-    """人事主管（或超管）驳回注册申请，该账号无法再登录。"""
+    """管理人员（或超管）驳回注册申请，该账号无法再登录。"""
     return success(service.UserService(db).reject_user(user_id, current_user))
 
 
@@ -771,7 +854,10 @@ def reject_user(user_id: int, current_user: CurrentUser, db: Session = Depends(g
     response_model=ApiResponse[None],
     summary="重置用户密码（管理员）",
     operation_id="reset_user_password",
-    dependencies=[Depends(operation_log("system", "UPDATE", "重置用户密码"))],
+    dependencies=[
+        Depends(operation_log("system", "UPDATE", "重置用户密码")),
+        Depends(require_permission("system:user:reset")),
+    ],
 )
 def reset_user_password(
     user_id: int, payload: schemas.UserPasswordUpdate, db: Session = Depends(get_db)
@@ -789,6 +875,8 @@ register_crud(
     create_schema=schemas.UserCreate,
     update_schema=schemas.UserUpdate,
     out_schema=schemas.UserOut,
+    view_code="system:user",
+    manage_code="system:user:manage",
 )
 
 
@@ -797,6 +885,7 @@ register_crud(
     response_model=ApiResponse[PageData[schemas.RoleOut]],
     summary="角色分页查询",
     operation_id="list_roles",
+    dependencies=[Depends(require_permission("system:role"))],
 )
 def list_roles(
     params: PageParams = Depends(PageParams.as_dependency),
@@ -816,7 +905,10 @@ def list_roles(
     response_model=ApiResponse[schemas.RoleOut],
     summary="分配角色权限",
     operation_id="assign_role_permissions",
-    dependencies=[Depends(operation_log("system", "UPDATE", "分配角色权限"))],
+    dependencies=[
+        Depends(operation_log("system", "UPDATE", "分配角色权限")),
+        Depends(require_permission("system:role:assign")),
+    ],
 )
 def assign_role_permissions(
     role_id: int, payload: schemas.RolePermissionAssign, db: Session = Depends(get_db)
@@ -833,6 +925,8 @@ register_crud(
     create_schema=schemas.RoleCreate,
     update_schema=schemas.RoleUpdate,
     out_schema=schemas.RoleOut,
+    view_code="system:role",
+    manage_code="system:role:manage",
 )
 
 
@@ -841,6 +935,7 @@ register_crud(
     response_model=ApiResponse[list[schemas.PermissionTreeOut]],
     summary="权限资源树",
     operation_id="get_permission_tree",
+    dependencies=[Depends(require_permission("system:permission"))],
 )
 def get_permission_tree(db: Session = Depends(get_db)) -> Any:
     return success(service.PermissionService(db).tree())
@@ -851,6 +946,7 @@ def get_permission_tree(db: Session = Depends(get_db)) -> Any:
     response_model=ApiResponse[PageData[schemas.PermissionOut]],
     summary="权限分页查询",
     operation_id="list_permissions",
+    dependencies=[Depends(require_permission("system:permission"))],
 )
 def list_permissions(
     params: PageParams = Depends(PageParams.as_dependency),
@@ -875,6 +971,8 @@ register_crud(
     create_schema=schemas.PermissionCreate,
     update_schema=schemas.PermissionUpdate,
     out_schema=schemas.PermissionOut,
+    view_code="system:permission",
+    manage_code="system:permission:manage",
 )
 
 
@@ -886,6 +984,7 @@ register_crud(
     response_model=ApiResponse[PageData[schemas.OperationLogOut]],
     summary="操作日志分页查询",
     operation_id="list_operation_logs",
+    dependencies=[Depends(require_permission("system:log"))],
 )
 def list_operation_logs(
     params: PageParams = Depends(PageParams.as_dependency),
@@ -914,16 +1013,16 @@ def list_operation_logs(
     response_model=ApiResponse[int],
     summary="清理指定时间之前的操作日志",
     operation_id="clear_operation_logs",
-    dependencies=[Depends(operation_log("system", "DELETE", "清理操作日志"))],
+    dependencies=[
+        Depends(operation_log("system", "DELETE", "清理操作日志")),
+        Depends(require_permission("system:log:clear")),
+    ],
 )
 def clear_operation_logs(
-    current_user: CurrentUser,
     before: datetime = Query(..., description="清理该时间之前的日志"),
     db: Session = Depends(get_db),
 ) -> Any:
-    """只允许超级管理员清理历史日志。"""
-    if not current_user.is_superuser:
-        raise BusinessException(errors.CODE_FORBIDDEN, "只有超级管理员可以清理操作日志")
+    """持有 `system:log:clear` 权限的管理人员清理历史日志。"""
     return success(service.OperationLogService(db).clear_before(before), message="清理完成")
 
 

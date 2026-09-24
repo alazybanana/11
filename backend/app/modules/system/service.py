@@ -20,7 +20,7 @@ from app.common.exceptions import BusinessException
 from app.common.pagination import PageData, PageParams
 from app.core import security
 from app.modules.system import errors, models, schemas
-from app.modules.system.enums import ApprovalStatus, BomStatus, BomType
+from app.modules.system.enums import ApprovalStatus, BomStatus, BomType, CommonStatus
 from app.modules.system.repository import (
     BomLineRepository,
     BomRepository,
@@ -255,6 +255,28 @@ class BomService(BaseService):
         self._validate_version(data["parent_material_id"], data["version"], data["bom_type"])
 
     def before_update(self, obj: models.Bom, data: dict[str, Any]) -> None:
+        new_status = _enum_value(data.get("status", obj.status))
+
+        # 已发布的 BOM 只允许改状态与备注，其余字段（换父件 / 版本 / 类型 / 有效期等）一律冻结
+        if obj.status == BomStatus.RELEASED.value:
+            frozen = sorted(set(data) - {"status", "remark"})
+            if frozen:
+                raise BusinessException(
+                    errors.CODE_IN_USE,
+                    f"已发布的 BOM 只允许修改状态与备注，不允许修改：{'、'.join(frozen)}",
+                )
+        # 空 BOM 不允许发布：没有任何子件的 BOM 发布后没有工程意义
+        if new_status == BomStatus.RELEASED.value and obj.status != BomStatus.RELEASED.value:
+            if not BomLineRepository(self.db).exists(bom_id=obj.id):
+                raise BusinessException(
+                    errors.CODE_IN_USE, "空 BOM 不允许发布，请先添加 BOM 行"
+                )
+        # 已作废的 BOM 不能直接回到已发布，必须退回草稿重新走发布流程
+        if obj.status == BomStatus.OBSOLETE.value and new_status == BomStatus.RELEASED.value:
+            raise BusinessException(
+                errors.CODE_IN_USE, "已作废的 BOM 不能直接发布，请先置为草稿"
+            )
+
         parent_material_id = data.get("parent_material_id", obj.parent_material_id)
         version = data.get("version", obj.version)
         bom_type = data.get("bom_type", obj.bom_type)
@@ -418,6 +440,10 @@ class BomService(BaseService):
         真触到了说明库里存在历史脏数据，此时直接报错而不是悄悄截断。
         """
         material = self._material_or_404(material_id)
+        if material.status == CommonStatus.DISABLED.value:
+            raise BusinessException(
+                errors.CODE_INVALID_REFERENCE, f"物料「{material.code}」已停用，不能展开 BOM"
+            )
         on_date = on_date or date.today()
         root = self._tree_node(material, level=1, quantity=1, acc_quantity=1)
 
@@ -453,6 +479,8 @@ class BomService(BaseService):
                     child = material_map.get(line.child_material_id)
                     if child is None:
                         continue  # 子件物料已不存在（ID 引用无外键，只能跳过）
+                    if child.status == CommonStatus.DISABLED.value:
+                        continue  # 停用物料不参与展开，避免被带进 MRP 需求
                     child_acc = acc_quantity * float(line.quantity) / base_qty
                     child_node = self._tree_node(
                         child,
@@ -1135,22 +1163,21 @@ class UserService(BaseService):
         self.db.commit()
         return self.to_out(obj)
 
-    def _ensure_hr_operator(self, operator: models.User) -> None:
-        """审批权限：超级管理员，或已批准的人事主管。
+    def _ensure_can_review(self, operator: models.User) -> None:
+        """审批权限：超级管理员，或持有 `system:user:approve` 权限的已批准账号。
 
-        注意：注册中（PENDING）的账号即使绑定了人事主管角色，审批前也不具备审批权。
+        注意：注册中（PENDING）的账号即使绑定了有审批权的角色，审批前权限也不生效
+        （见 `login_user_info`），从权限编码上天然挡住。
         """
         if operator.is_superuser:
             return
         if operator.approval_status != ApprovalStatus.APPROVED.value:
-            raise BusinessException(errors.CODE_FORBIDDEN, "仅人事主管或超级管理员可执行审批")
-        role_ids = UserRoleRepository(self.db).list_role_ids(operator.id)
-        role_codes = {role.code for role in RoleRepository(self.db).get_by_ids(role_ids)}
-        if "HR_MANAGER" not in role_codes:
-            raise BusinessException(errors.CODE_FORBIDDEN, "仅人事主管或超级管理员可执行审批")
+            raise BusinessException(errors.CODE_FORBIDDEN, "仅已批准的管理人员可执行审批")
+        if "system:user:approve" not in self.login_user_info(operator.id).permissions:
+            raise BusinessException(errors.CODE_FORBIDDEN, f"无访问权限（缺少权限：system:user:approve）")
 
     def _review(self, user_id: int, operator: models.User, status: ApprovalStatus) -> schemas.UserOut:
-        self._ensure_hr_operator(operator)
+        self._ensure_can_review(operator)
         if operator.id == user_id:
             raise BusinessException(errors.CODE_SELF_OPERATION, "不能审批自己的账号")
         user = self.get_or_404(user_id)
@@ -1255,3 +1282,8 @@ def _index(objs: Iterable[Any]) -> dict[int, Any]:
 def _attr(obj: Any, name: str) -> Any:
     """安全取属性，`obj` 为 None 时返回 None。"""
     return getattr(obj, name, None) if obj is not None else None
+
+
+def _enum_value(value: Any) -> Any:
+    """把 Pydantic 传入的枚举统一成数据库里存的字符串值。"""
+    return getattr(value, "value", value)

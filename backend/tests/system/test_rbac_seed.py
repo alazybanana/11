@@ -26,6 +26,18 @@ def _count(db: Session, model: Any) -> int:
     return db.query(model).count()
 
 
+def _granted(db: Session, role_code: str) -> set[str]:
+    """取某个角色实际拥有的权限编码集合。"""
+    rows = (
+        db.query(models.Permission.code)
+        .join(models.RolePermission, models.RolePermission.permission_id == models.Permission.id)
+        .join(models.Role, models.Role.id == models.RolePermission.role_id)
+        .filter(models.Role.code == role_code)
+        .all()
+    )
+    return {row[0] for row in rows}
+
+
 def test_seed_creates_nine_roles(session_factory: Any) -> None:
     with session_factory() as db:
         seed_roles_and_permissions(db)
@@ -66,30 +78,37 @@ def test_qc_and_finance_scope(session_factory: Any) -> None:
     """QC 只管质检、财务只有业务域只读权限，都不碰系统权限管理。"""
     with session_factory() as db:
         seed_roles_and_permissions(db)
-        role_ids = {
-            role.code: role.id for role in db.query(models.Role).all()
-        }
-        perm_ids = {
-            perm.code: perm.id for perm in db.query(models.Permission).all()
-        }
 
-        def granted(role_code: str) -> set[str]:
-            rows = (
-                db.query(models.Permission.code)
-                .join(models.RolePermission, models.RolePermission.permission_id == models.Permission.id)
-                .filter(models.RolePermission.role_id == role_ids[role_code])
-                .all()
-            )
-            return {row[0] for row in rows}
-
-        assert "procurement:qc" in granted("QC")
-        assert "planning:qc" in granted("QC")
-        assert "system:permission" not in granted("QC")
+        assert "procurement:qc" in _granted(db, "QC")
+        assert "planning:qc" in _granted(db, "QC")
+        assert "system:permission" not in _granted(db, "QC")
         # 财务只读监督，不授予系统权限管理能力
-        finance = granted("FINANCE")
+        finance = _granted(db, "FINANCE")
         assert "system:permission" not in finance
         assert "system:role" not in finance
         assert "inventory:ledger" in finance
+
+
+def test_manage_permissions_bindings(session_factory: Any) -> None:
+    """功能码=查看、`:manage`=写操作：设计人员可写物料/BOM/工艺，QC/财务没有任何写码。"""
+    with session_factory() as db:
+        seed_roles_and_permissions(db)
+
+        design = _granted(db, "DESIGN")
+        assert "system:material:manage" in design
+        assert "system:bom:manage" in design
+        assert "system:routing:manage" in design
+        assert "system:dictionary:manage" not in design
+        assert "system:user" not in design
+
+        # 质检与财务只有查看类权限，不持有任何 :manage 写码
+        for role_code in ("QC", "FINANCE"):
+            assert not {code for code in _granted(db, role_code) if code.endswith(":manage")}
+
+        # 管理人员全量：含新增的 :manage 码
+        admin = _granted(db, "ADMIN")
+        for spec in PERMISSION_SEEDS:
+            assert spec["code"] in admin
 
 
 def test_seed_is_idempotent(session_factory: Any) -> None:

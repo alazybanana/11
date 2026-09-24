@@ -1,14 +1,15 @@
 """system 模块对外契约（Service Contract）。
 
 **这是其它模块唯一允许 import 的 system 模块文件**（见 docs/architecture/module-boundaries.md）。
-sales / planning / procurement / inventory 需要产品、物料、BOM、工艺路线、组织人员、
+sales / planning / procurement / inventory 需要物料、BOM、工艺路线、组织人员、
 字典时，请调用本文件的函数，**不要** import `service.py` / `repository.py` / `models.py`，
 也不要跨模块 JOIN 本模块的表。
 
 约定：
 1. 本文件的函数**都是只读**的，返回 `dict` 而非 ORM 对象，避免把本模块的表结构泄漏出去；
 2. 返回的 `dict` 键名即为契约的一部分，变更键名等同于破坏性变更，需要同步通知各模块；
-3. 写操作（新增 / 修改基础数据）不提供契约，只能通过 `/api/v1/system/...` 接口由管理员操作。
+3. 写操作（新增 / 修改基础数据）不提供契约，只能通过 `/api/v1/system/...` 接口操作；
+4. 产品已并入物料统一管理，所有契约函数一律用 `material_id` 定位（成品 / 半成品 / 原材料同理）。
 
 典型用法：
 
@@ -16,8 +17,17 @@ sales / planning / procurement / inventory 需要产品、物料、BOM、工艺�
 # planning 做 MRP 展开时需要 BOM 子件
 from app.modules.system.contract import get_bom_lines
 
-for line in get_bom_lines(db, product_id=12):
+for line in get_bom_lines(db, material_id=12):
     material_code, quantity = line["material_code"], line["quantity"]
+```
+
+接口鉴权：各模块保护自己的接口时，请直接复用契约导出的 `require_permission`：
+
+```python
+from app.modules.system.contract import require_permission
+
+@router.get("/materials", dependencies=[Depends(require_permission("system:material"))])
+def list_materials(): ...
 ```
 """
 
@@ -36,7 +46,7 @@ from app.modules.system.deps import (
     operation_log,
     require_permission,
 )
-from app.modules.system.enums import BomStatus
+from app.modules.system.enums import BomType
 from app.modules.system.repository import (
     BomLineRepository,
     BomRepository,
@@ -46,7 +56,6 @@ from app.modules.system.repository import (
     MaterialRepository,
     OrganizationRepository,
     PermissionRepository,
-    ProductRepository,
     RolePermissionRepository,
     RoleRepository,
     RoutingRepository,
@@ -65,14 +74,13 @@ __all__ = [
     "operation_log",
     "client_ip",
     "log_operation",
-    # 产品 / 物料
-    "get_product",
-    "get_products_by_ids",
+    # 物料
     "get_material",
     "get_materials_by_ids",
     # BOM / 工艺路线
     "get_active_bom",
     "get_bom_lines",
+    "expand_bom_lines",
     "get_routing_steps",
     # 组织 / 人员
     "get_organization",
@@ -88,22 +96,8 @@ __all__ = [
 
 
 # --------------------------------------------------------------------------- #
-# 产品 / 物料
+# 物料（成品 / 半成品 / 原材料统一主数据）
 # --------------------------------------------------------------------------- #
-def _product_dict(product: models.Product) -> dict[str, Any]:
-    return {
-        "id": product.id,
-        "code": product.code,
-        "name": product.name,
-        "spec": product.spec,
-        "model": product.model,
-        "unit": product.unit,
-        "category_code": product.category_code,
-        "standard_cost": float(product.standard_cost) if product.standard_cost is not None else None,
-        "status": product.status,
-    }
-
-
 def _material_dict(material: models.Material) -> dict[str, Any]:
     return {
         "id": material.id,
@@ -122,17 +116,6 @@ def _material_dict(material: models.Material) -> dict[str, Any]:
     }
 
 
-def get_product(db: Session, product_id: int) -> Optional[dict[str, Any]]:
-    """按 ID 取产品，不存在返回 None。"""
-    product = ProductRepository(db).get(product_id)
-    return _product_dict(product) if product is not None else None
-
-
-def get_products_by_ids(db: Session, product_ids: Iterable[int]) -> list[dict[str, Any]]:
-    """批量取产品（sales 做订单行、planning 做 MPS 时常用）。"""
-    return [_product_dict(item) for item in ProductRepository(db).get_by_ids(product_ids)]
-
-
 def get_material(db: Session, material_id: int) -> Optional[dict[str, Any]]:
     """按 ID 取物料，不存在返回 None。"""
     material = MaterialRepository(db).get(material_id)
@@ -147,27 +130,18 @@ def get_materials_by_ids(db: Session, material_ids: Iterable[int]) -> list[dict[
 # --------------------------------------------------------------------------- #
 # BOM / 工艺路线
 # --------------------------------------------------------------------------- #
-def get_active_bom(db: Session, product_id: int) -> Optional[dict[str, Any]]:
-    """取产品当前生效的 BOM 头（优先取"已发布且在有效期内"的版本）。"""
-    candidates = [
-        bom
-        for bom in BomRepository(db).list_all(filters={"product_id": product_id})
-        if bom.status == BomStatus.RELEASED.value
-    ]
-    if not candidates:
-        return None
-    today = date.today()
-    effective = [
-        bom
-        for bom in candidates
-        if (bom.effective_from is None or bom.effective_from <= today)
-        and (bom.effective_to is None or bom.effective_to >= today)
-    ]
-    bom = max(effective or candidates, key=lambda item: item.id)
+def _bom_value(value: Any) -> Any:
+    """把可能以枚举形式传入的参数统一成数据库里的字符串值。"""
+    return getattr(value, "value", value)
+
+
+def _bom_header(bom: models.Bom) -> dict[str, Any]:
+    """BOM 头的契约出参（与 get_bom_lines 的 bom_id 配套使用）。"""
     return {
         "id": bom.id,
         "code": bom.code,
-        "product_id": bom.product_id,
+        "material_id": bom.parent_material_id,
+        "bom_type": bom.bom_type,
         "version": bom.version,
         "base_qty": float(bom.base_qty),
         "status": bom.status,
@@ -176,26 +150,60 @@ def get_active_bom(db: Session, product_id: int) -> Optional[dict[str, Any]]:
     }
 
 
-def get_bom_lines(db: Session, product_id: int, version: Optional[str] = None) -> list[dict[str, Any]]:
-    """取产品 BOM 的子件行，供 MRP / 生产作业计划展开用料。
+def get_active_bom(
+    db: Session,
+    material_id: int,
+    *,
+    bom_type: str = BomType.MANUFACTURE.value,
+    version: Optional[str] = None,
+    on_date: Optional[date] = None,
+) -> Optional[dict[str, Any]]:
+    """取物料当前生效的 BOM 头（优先取"已发布且在有效期内"的版本）。
+
+    - 不传 `version`：取 `on_date`（缺省今天）当天生效的已发布 BOM，多份同时生效时取最后录入的；
+    - 传 `version`：取该物料、该类型、该版本的 BOM（无论状态，便于 planning 校对指定版本）。
+    """
+    repo = BomRepository(db)
+    if version is not None:
+        bom = repo.get_by(
+            parent_material_id=material_id,
+            bom_type=_bom_value(bom_type),
+            version=version,
+        )
+        return _bom_header(bom) if bom is not None else None
+    effective = repo.map_effective_bom(
+        [material_id], bom_type=_bom_value(bom_type), on_date=on_date or date.today()
+    )
+    bom = effective.get(material_id)
+    return _bom_header(bom) if bom is not None else None
+
+
+def get_bom_lines(
+    db: Session,
+    material_id: int,
+    *,
+    bom_type: str = BomType.MANUFACTURE.value,
+    version: Optional[str] = None,
+    on_date: Optional[date] = None,
+) -> list[dict[str, Any]]:
+    """取物料 BOM 的子件行，供 MRP / 生产作业计划展开用料。
 
     返回字段：`bom_id`、`bom_version`、`line_no`、`material_id`、`material_code`、
-    `material_name`、`material_unit`、`quantity`、`loss_rate`、`source_type`。
+    `material_name`、`material_unit`、`quantity`、`loss_rate`、`source_type`、
+    `position`、`is_phantom`、`is_optional`、`option_group`、`substitute_group`、
+    `substitute_priority`。
 
     - 不传 `version` 时取当前生效 BOM（`get_active_bom`）；
     - BOM 不存在或未发布时返回空列表（调用方据此判断能否展开）。
     """
-    if version is None:
-        bom_info = get_active_bom(db, product_id)
-    else:
-        bom = BomRepository(db).get_by(product_id=product_id, version=version)
-        bom_info = {"id": bom.id, "version": bom.version} if bom is not None else None
+    bom_info = get_active_bom(db, material_id, bom_type=bom_type, version=version, on_date=on_date)
     if bom_info is None:
         return []
 
     lines = BomLineRepository(db).list_by_bom(int(bom_info["id"]))
     material_map = {
-        item.id: item for item in MaterialRepository(db).get_by_ids(
+        item.id: item
+        for item in MaterialRepository(db).get_by_ids(
             {line.child_material_id for line in lines}
         )
     }
@@ -214,23 +222,51 @@ def get_bom_lines(db: Session, product_id: int, version: Optional[str] = None) -
                 "quantity": float(line.quantity),
                 "loss_rate": float(line.loss_rate),
                 "source_type": getattr(material, "source_type", None),
+                "position": line.position,
+                "is_phantom": bool(line.is_phantom),
+                "is_optional": bool(line.is_optional),
+                "option_group": line.option_group,
+                "substitute_group": line.substitute_group,
+                "substitute_priority": line.substitute_priority,
             }
         )
     return result
 
 
-def get_routing_steps(db: Session, product_id: int, version: Optional[str] = None) -> list[dict[str, Any]]:
-    """取产品工艺路线的工序列表，供 planning 排产 / 派工单使用。
+def expand_bom_lines(
+    db: Session,
+    material_id: int,
+    *,
+    bom_type: str = BomType.MANUFACTURE.value,
+    on_date: Optional[date] = None,
+) -> list[dict[str, Any]]:
+    """把物料的多层 BOM 展开成一维用料清单（与接口 `/boms/flat-lines` 同规则）。
+
+    - 只沿"已发布且在有效期内"的 BOM 逐层展开，`acc_quantity` 已按各层 `base_qty` 折算；
+    - 虚拟件（`is_phantom`）不单独成行，直接穿透到下层；
+    - 可选件与替代料原样保留，由调用方（MRP / 配置）自行取舍；
+    - 已停用物料不会出现在结果里。
+
+    返回字段与 `get_bom_lines` 的行字段一致，另加 `level` / `acc_quantity`。
+    """
+    from app.modules.system.service import BomService  # 延迟导入，避免模块加载期循环依赖
+
+    nodes = BomService(db).expand_lines(material_id, bom_type=bom_type, on_date=on_date)
+    return [node.model_dump(exclude={"children"}) for node in nodes]
+
+
+def get_routing_steps(db: Session, material_id: int, version: Optional[str] = None) -> list[dict[str, Any]]:
+    """取物料工艺路线的工序列表，供 planning 排产 / 派工单使用。
 
     返回字段：`routing_id`、`routing_code`、`step_no`、`step_code`、`step_name`、
     `work_center`、`equipment`、`setup_minutes`、`run_minutes`、`is_key`。
-    默认取该产品被标记为"默认"的工艺路线。
+    默认取该物料被标记为"默认"的工艺路线。
     """
     repo = RoutingRepository(db)
     routing = (
-        repo.get_by(product_id=product_id, version=version)
+        repo.get_by(material_id=material_id, version=version)
         if version is not None
-        else repo.get_by(product_id=product_id, is_default=True)
+        else repo.get_by(material_id=material_id, is_default=True)
     )
     if routing is None:
         return []

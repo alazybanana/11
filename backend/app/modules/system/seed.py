@@ -128,6 +128,25 @@ PERMISSION_SEEDS: list[dict[str, Any]] = [
      "parent": "system", "path": "/system/permission", "sort_order": 80},
     {"code": "system:log", "name": "操作日志", "perm_type": PermissionType.MENU.value,
      "parent": "system", "path": "/system/log", "sort_order": 90},
+    # system 常规写操作（功能码 = 查看；`:manage` = 新增 / 修改 / 删除等写操作）
+    {"code": "system:material:manage", "name": "维护物料", "perm_type": PermissionType.BUTTON.value,
+     "parent": "system:material", "path": "/system/material", "sort_order": 10},
+    {"code": "system:bom:manage", "name": "维护 BOM", "perm_type": PermissionType.BUTTON.value,
+     "parent": "system:bom", "path": "/system/bom", "sort_order": 10},
+    {"code": "system:routing:manage", "name": "维护工艺路线", "perm_type": PermissionType.BUTTON.value,
+     "parent": "system:routing", "path": "/system/routing", "sort_order": 10},
+    {"code": "system:org:manage", "name": "维护组织与人员", "perm_type": PermissionType.BUTTON.value,
+     "parent": "system:org", "path": "/system/org", "sort_order": 10},
+    {"code": "system:dictionary:manage", "name": "维护基础字典", "perm_type": PermissionType.BUTTON.value,
+     "parent": "system:dictionary", "path": "/system/dictionary", "sort_order": 10},
+    {"code": "system:user:manage", "name": "维护账号", "perm_type": PermissionType.BUTTON.value,
+     "parent": "system:user", "path": "/system/user", "sort_order": 10},
+    {"code": "system:role:manage", "name": "维护角色", "perm_type": PermissionType.BUTTON.value,
+     "parent": "system:role", "path": "/system/role", "sort_order": 10},
+    {"code": "system:permission:manage", "name": "维护权限", "perm_type": PermissionType.BUTTON.value,
+     "parent": "system:permission", "path": "/system/permission", "sort_order": 10},
+    {"code": "system:log:manage", "name": "维护操作日志", "perm_type": PermissionType.BUTTON.value,
+     "parent": "system:log", "path": "/system/log", "sort_order": 10},
     # system 高危操作（仅管理人员持有）
     {"code": "system:user:approve", "name": "注册审批", "perm_type": PermissionType.BUTTON.value,
      "parent": "system:user", "path": "/system/users/{id}/approve", "sort_order": 10},
@@ -193,7 +212,10 @@ ALL_PERMISSION_CODES: list[str] = [item["code"] for item in PERMISSION_SEEDS]
 # --------------------------------------------------------------------------- #
 ROLE_PERMISSION_BINDINGS: dict[str, list[str]] = {
     "ADMIN": ALL_PERMISSION_CODES,
-    "DESIGN": ["system", "system:material", "system:bom", "system:routing", "system:dictionary"],
+    "DESIGN": [
+        "system", "system:material", "system:bom", "system:routing", "system:dictionary",
+        "system:material:manage", "system:bom:manage", "system:routing:manage",
+    ],
     "MAKE": [
         "system", "system:material", "system:bom", "system:routing",
         "planning", "planning:schedule", "planning:dispatch", "planning:picking", "planning:finish",
