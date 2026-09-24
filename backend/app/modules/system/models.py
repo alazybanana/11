@@ -1,414 +1,481 @@
-"""system 模块 ORM 模型（Owner: system 模块）。
+"""system 模块 ORM 模型 —— 企业基础主数据与平台管理。
 
-本文件定义**系统与基础信息管理**的全部业务表：
+本模块是**全系统唯一的基础数据 Owner**（规格 §7 / §8 / §10）：
 
-1. 产品与物料信息：`sys_material`（成品/半成品/原材料统一主数据）、`sys_bom`、`sys_bom_item`
-2. 工艺信息：`sys_routing`、`sys_routing_operation`
-3. 组织与人员：`sys_organization`、`sys_personnel`（全系统唯一员工）
-4. 共性基础字典：`sys_dictionary`、`sys_dictionary_item`
-5. 访问权限：`sys_user`、`sys_role`、`sys_permission`、`sys_user_role`、`sys_role_permission`
-6. 操作日志：`sys_operation_log`
+- 唯一物料主表 `sys_material`（用 `material_type` 区分 RAW/PURCHASED/SEMI/FINISHED，
+  不做独立的 product / material 多套表）。其他模块**只读**，禁止另建物料表。
+- 唯一员工表 `sys_personnel`（禁止 sal_salesperson / pur_buyer / inv_staff / pln_worker）。
+- BOM / 工艺路线 / 组织 / 字典 / RBAC / 操作日志。
 
-表名已按 data-ownership.md 的模块前缀规范统一为 `sys_` 前缀。
+建模约定：
 
-约束（见 docs/architecture/data-ownership.md）：
-- 这些表**只有 system 模块能写**，其它模块只能通过本模块的 `contract.py` / HTTP 接口读取；
-- 表间关系一律用 ID 引用，**不对其它模块的表建外键**；
-- 新增表后必须执行 `alembic revision --autogenerate -m "..."` 生成迁移，并更新 data-ownership.md。
+1. 表名 `snake_case` + `sys_` 前缀；主键统一 `BIGINT`（`BigIntPk`）。
+2. 模块**内部**关系使用真实外键；跨模块引用也统一指向对方 `id`
+   并使用 `ON DELETE RESTRICT`（规格 §20），避免基础数据被删除导致历史业务丢失。
+3. 业务状态使用明确枚举 + `CHECK` 约束（规格 §23 / §25）。
 """
 
 from datetime import date, datetime
+from decimal import Decimal
+from typing import List, Optional
 
 from sqlalchemy import (
-    JSON,
+    BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
+    ForeignKey,
     Integer,
     Numeric,
     String,
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
-from app.modules.system.enums import (
-    ApprovalStatus,
-    BomStatus,
-    BomType,
-    CommonStatus,
-    DataScope,
-    EmployeeStatus,
-    Gender,
-    MaterialType,
-    OrgType,
-    PermissionType,
-    RoutingStatus,
-    SourceType,
-)
+from app.core.mixins import AuditMixin, BigIntFk, BigIntPk, CodeStr, Money, NameStr
+from app.shared.enums import MaterialType, RecordStatus, SupplyType
+
+# ====================================================================
+# 组织 / 人员 / 账号（规格 §10：员工统一由 System 平台管理）
+# ====================================================================
 
 
-class TimestampMixin:
-    """创建 / 更新时间公共字段。"""
+class SysOrganization(Base, AuditMixin):
+    """组织 / 部门（树形，`parent_id` 自引用）。"""
 
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.now, nullable=False, comment="创建时间"
+    __tablename__ = "sys_organization"
+
+    id: Mapped[BigIntPk]
+    org_code: Mapped[CodeStr] = mapped_column(unique=True, comment="组织编码")
+    org_name: Mapped[NameStr] = mapped_column(comment="组织名称")
+    parent_id: Mapped[Optional[BigIntFk]] = mapped_column(
+        ForeignKey("sys_organization.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+        comment="上级组织ID",
     )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.now, onupdate=datetime.now, nullable=False, comment="更新时间"
-    )
-
-
-# --------------------------------------------------------------------------- #
-# 一、产品信息管理：产品 / 物料 / BOM
-# --------------------------------------------------------------------------- #
-class Material(TimestampMixin, Base):
-    """物料主数据（Owner: system）。
-
-    采购件与自制件都在这张表里，`source_type` 决定 MRP 是产生采购需求还是生产需求。
-    """
-
-    __tablename__ = "sys_material"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    code: Mapped[str] = mapped_column(String(32), unique=True, index=True, comment="物料编码")
-    name: Mapped[str] = mapped_column(String(64), comment="物料名称")
-    spec: Mapped[str | None] = mapped_column(String(128), comment="规格型号")
-    model: Mapped[str | None] = mapped_column(String(64), comment="型号（成品 / 半成品常用）")
-    unit: Mapped[str] = mapped_column(String(16), default="个", comment="计量单位")
-    category_code: Mapped[str | None] = mapped_column(
-        String(32), index=True, comment="物料分类（引用 sys_dictionary_item.item_code）"
-    )
-    material_type: Mapped[str] = mapped_column(
-        String(16), default=MaterialType.RAW.value, comment="物料类型 RAW/SEMI/FINISHED/PACK"
-    )
-    source_type: Mapped[str] = mapped_column(
-        String(16), default=SourceType.PURCHASE.value, comment="来源 PURCHASE/MAKE"
-    )
-    standard_cost: Mapped[float | None] = mapped_column(Numeric(12, 2), comment="标准成本")
-    safety_stock: Mapped[float | None] = mapped_column(Numeric(14, 4), comment="安全库存")
-    lead_time_days: Mapped[int | None] = mapped_column(Integer, comment="采购提前期（天）")
-    status: Mapped[str] = mapped_column(
-        String(16), default=CommonStatus.ENABLED.value, comment="状态 ENABLED/DISABLED"
-    )
-    remark: Mapped[str | None] = mapped_column(String(255), comment="备注")
-
-
-class Bom(TimestampMixin, Base):
-    """BOM 头（Owner: system）。
-
-    父件与子件都引用 `material`，因此多层 BOM 天然成立：半成品物料自己再挂一份 BOM
-    即可继续向下展开，不需要额外的类型判别列。
-    """
-
-    __tablename__ = "sys_bom"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    code: Mapped[str] = mapped_column(String(32), unique=True, index=True, comment="BOM 编码")
-    parent_material_id: Mapped[int] = mapped_column(
-        Integer, index=True, comment="父件物料 ID（本 BOM 描述它由哪些子件构成）"
-    )
-    bom_type: Mapped[str] = mapped_column(
-        String(16), default=BomType.MANUFACTURE.value, comment="BOM 类型 DESIGN/MANUFACTURE/SALE"
-    )
-    version: Mapped[str] = mapped_column(String(16), default="V1.0", comment="版本号")
-    base_qty: Mapped[float] = mapped_column(
-        Numeric(12, 4), default=1, comment="基准数量（BOM 行用量对应的产出量）"
+    org_type: Mapped[str] = mapped_column(String(20), nullable=False, default="DEPARTMENT", comment="组织类型")
+    manager_id: Mapped[Optional[BigIntFk]] = mapped_column(
+        BigInteger, nullable=True, comment="负责人ID（sys_personnel.id，延迟引用避免建表循环）"
     )
     status: Mapped[str] = mapped_column(
-        String(16), default=BomStatus.DRAFT.value, comment="状态 DRAFT/RELEASED/OBSOLETE"
+        String(20), nullable=False, default=RecordStatus.ACTIVE.value, comment="状态"
     )
-    effective_from: Mapped[date | None] = mapped_column(Date, comment="生效日期")
-    effective_to: Mapped[date | None] = mapped_column(Date, comment="失效日期")
-    remark: Mapped[str | None] = mapped_column(String(255), comment="备注")
+    remark: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="备注")
 
     __table_args__ = (
-        UniqueConstraint(
-            "parent_material_id", "version", "bom_type", name="uq_bom_parent_version_type"
+        CheckConstraint(
+            "status IN ('ACTIVE','INACTIVE')", name="ck_sys_organization_status"
+        ),
+        CheckConstraint(
+            "org_type IN ('COMPANY','FACTORY','DEPARTMENT','WORKSHOP','WAREHOUSE')",
+            name="ck_sys_organization_type",
         ),
     )
 
 
-class BomLine(Base):
-    """BOM 行（Owner: system）。子件统一引用 `material`，半成品物料自身再挂 BOM 形成多级结构。"""
-
-    __tablename__ = "sys_bom_item"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    bom_id: Mapped[int] = mapped_column(Integer, index=True, comment="所属 BOM ID")
-    line_no: Mapped[int] = mapped_column(Integer, default=10, comment="行号")
-    child_material_id: Mapped[int] = mapped_column(Integer, index=True, comment="子件物料 ID")
-    quantity: Mapped[float] = mapped_column(Numeric(14, 4), default=1, comment="单位用量")
-    unit: Mapped[str | None] = mapped_column(String(16), comment="单位")
-    loss_rate: Mapped[float] = mapped_column(Numeric(6, 4), default=0, comment="损耗率（0~1）")
-    position: Mapped[str | None] = mapped_column(String(64), comment="装配位置")
-    is_phantom: Mapped[bool] = mapped_column(
-        Boolean, default=False, comment="虚拟件：不实际入库，展开时直接穿透到下层子件"
-    )
-    is_optional: Mapped[bool] = mapped_column(
-        Boolean, default=False, comment="可选件：与同选配组的其它行按配置择一"
-    )
-    option_group: Mapped[str | None] = mapped_column(
-        String(32), index=True, comment="选配组编码（同组即为同一个可选配置点）"
-    )
-    substitute_group: Mapped[str | None] = mapped_column(
-        String(32), index=True, comment="替代料组编码（同组内互为替代）"
-    )
-    substitute_priority: Mapped[int] = mapped_column(
-        Integer, default=1, comment="替代优先级，数字小者优先选用"
-    )
-    remark: Mapped[str | None] = mapped_column(String(255), comment="备注")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
-
-    __table_args__ = (UniqueConstraint("bom_id", "line_no", name="uq_bom_line_no"),)
-
-
-# --------------------------------------------------------------------------- #
-# 二、工艺信息管理：工艺路线 / 工序
-# --------------------------------------------------------------------------- #
-class Routing(TimestampMixin, Base):
-    """工艺路线头（Owner: system）。"""
-
-    __tablename__ = "sys_routing"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    code: Mapped[str] = mapped_column(String(32), unique=True, index=True, comment="工艺路线编码")
-    material_id: Mapped[int] = mapped_column(Integer, index=True, comment="适用物料 ID")
-    name: Mapped[str] = mapped_column(String(64), comment="工艺路线名称")
-    version: Mapped[str] = mapped_column(String(16), default="V1.0", comment="版本号")
-    is_default: Mapped[bool] = mapped_column(
-        Boolean, default=False, comment="是否该产品默认工艺路线"
-    )
-    status: Mapped[str] = mapped_column(
-        String(16), default=RoutingStatus.DRAFT.value, comment="状态 DRAFT/RELEASED/OBSOLETE"
-    )
-    remark: Mapped[str | None] = mapped_column(String(255), comment="备注")
-
-    __table_args__ = (
-        UniqueConstraint("material_id", "version", name="uq_routing_material_version"),
-    )
-
-
-class RoutingStep(Base):
-    """工序（工艺路线行，Owner: system）。"""
-
-    __tablename__ = "sys_routing_operation"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    routing_id: Mapped[int] = mapped_column(Integer, index=True, comment="所属工艺路线 ID")
-    step_no: Mapped[int] = mapped_column(Integer, default=10, comment="工序号（步序）")
-    step_code: Mapped[str | None] = mapped_column(String(32), comment="工序编码")
-    step_name: Mapped[str] = mapped_column(String(64), comment="工序名称")
-    work_center: Mapped[str | None] = mapped_column(String(32), comment="工作中心")
-    equipment: Mapped[str | None] = mapped_column(String(64), comment="设备 / 工装")
-    setup_minutes: Mapped[float | None] = mapped_column(Numeric(10, 2), comment="准备工时（分钟）")
-    run_minutes: Mapped[float | None] = mapped_column(Numeric(10, 2), comment="单件工时（分钟）")
-    is_key: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否关键工序")
-    remark: Mapped[str | None] = mapped_column(String(255), comment="备注")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
-
-    __table_args__ = (
-        UniqueConstraint("routing_id", "step_no", name="uq_routing_step_no"),
-    )
-
-
-# --------------------------------------------------------------------------- #
-# 三、组织与人员信息管理
-# --------------------------------------------------------------------------- #
-class Organization(TimestampMixin, Base):
-    """组织 / 部门（Owner: system）。树形结构：`parent_id` 指向父节点，`path` 便于查子树。"""
-
-    __tablename__ = "sys_organization"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    code: Mapped[str] = mapped_column(String(32), unique=True, index=True, comment="组织编码")
-    name: Mapped[str] = mapped_column(String(64), comment="组织名称")
-    parent_id: Mapped[int | None] = mapped_column(Integer, index=True, comment="上级组织 ID")
-    path: Mapped[str] = mapped_column(
-        String(255), default="/", comment="层级路径，形如 /1/3/，用于查子树"
-    )
-    level: Mapped[int] = mapped_column(Integer, default=1, comment="层级，从 1 开始")
-    org_type: Mapped[str] = mapped_column(
-        String(16), default=OrgType.DEPT.value, comment="类型 COMPANY/DEPT/TEAM"
-    )
-    leader: Mapped[str | None] = mapped_column(String(32), comment="负责人")
-    phone: Mapped[str | None] = mapped_column(String(32), comment="联系电话")
-    sort_order: Mapped[int] = mapped_column(Integer, default=0, comment="同级排序")
-    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, comment="是否启用")
-    remark: Mapped[str | None] = mapped_column(String(255), comment="备注")
-
-
-class Employee(TimestampMixin, Base):
-    """人员档案（Owner: system）。账号（`user`）挂在人员上，实现"人员"与"账号"分离。"""
+class SysPersonnel(Base, AuditMixin):
+    """企业员工（全系统唯一人员表）。"""
 
     __tablename__ = "sys_personnel"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    code: Mapped[str] = mapped_column(String(32), unique=True, index=True, comment="工号")
-    name: Mapped[str] = mapped_column(String(32), comment="姓名")
-    gender: Mapped[str] = mapped_column(
-        String(8), default=Gender.UNKNOWN.value, comment="性别 MALE/FEMALE/UNKNOWN"
+    id: Mapped[BigIntPk]
+    employee_no: Mapped[CodeStr] = mapped_column(unique=True, comment="员工工号")
+    person_name: Mapped[NameStr] = mapped_column(comment="姓名")
+    org_id: Mapped[BigIntFk] = mapped_column(
+        ForeignKey("sys_organization.id", ondelete="RESTRICT"), nullable=False, index=True, comment="所属组织ID"
     )
-    phone: Mapped[str | None] = mapped_column(String(32), comment="手机号")
-    email: Mapped[str | None] = mapped_column(String(64), comment="邮箱")
-    org_id: Mapped[int | None] = mapped_column(Integer, index=True, comment="所属组织 ID")
-    position: Mapped[str | None] = mapped_column(String(32), comment="岗位")
-    hire_date: Mapped[date | None] = mapped_column(Date, comment="入职日期")
+    position: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, comment="岗位")
+    phone: Mapped[Optional[str]] = mapped_column(String(30), nullable=True, comment="联系电话")
+    email: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, comment="邮箱")
+    hire_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="入职日期")
     status: Mapped[str] = mapped_column(
-        String(16), default=EmployeeStatus.ACTIVE.value, comment="在职状态"
+        String(20), nullable=False, default=RecordStatus.ACTIVE.value, comment="状态"
     )
-    remark: Mapped[str | None] = mapped_column(String(255), comment="备注")
-
-
-# --------------------------------------------------------------------------- #
-# 四、共性基础字典管理
-# --------------------------------------------------------------------------- #
-class DictionaryType(TimestampMixin, Base):
-    """字典类型（Owner: system）。例如"物料分类""计量单位""工序类型"。"""
-
-    __tablename__ = "sys_dictionary"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    code: Mapped[str] = mapped_column(String(32), unique=True, index=True, comment="字典类型编码")
-    name: Mapped[str] = mapped_column(String(32), comment="字典类型名称")
-    is_system: Mapped[bool] = mapped_column(
-        Boolean, default=False, comment="系统内置字典（禁止删除）"
-    )
-    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, comment="是否启用")
-    remark: Mapped[str | None] = mapped_column(String(255), comment="备注")
-
-
-class DictionaryItem(TimestampMixin, Base):
-    """字典项（Owner: system）。`parent_id` 支持层级字典（如物料分类树）。"""
-
-    __tablename__ = "sys_dictionary_item"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    type_id: Mapped[int] = mapped_column(Integer, index=True, comment="所属字典类型 ID")
-    parent_id: Mapped[int | None] = mapped_column(Integer, index=True, comment="上级字典项 ID")
-    item_code: Mapped[str] = mapped_column(String(32), comment="字典项编码")
-    item_label: Mapped[str] = mapped_column(String(64), comment="字典项显示名")
-    item_value: Mapped[str | None] = mapped_column(String(64), comment="字典项值")
-    sort_order: Mapped[int] = mapped_column(Integer, default=0, comment="排序")
-    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, comment="是否启用")
-    extra: Mapped[dict | None] = mapped_column(JSON, comment="扩展属性")
-    remark: Mapped[str | None] = mapped_column(String(255), comment="备注")
+    remark: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="备注")
 
     __table_args__ = (
-        UniqueConstraint("type_id", "item_code", name="uq_dict_item_code"),
+        CheckConstraint(
+            "status IN ('ACTIVE','INACTIVE')", name="ck_sys_personnel_status"
+        ),
     )
 
 
-# --------------------------------------------------------------------------- #
-# 五、系统访问权限管理
-# --------------------------------------------------------------------------- #
-class User(TimestampMixin, Base):
-    """账号（Owner: system）。密码只存哈希，绝不存明文。"""
+class SysUser(Base, AuditMixin):
+    """软件登录账号（与 Personnel 分离：一个 Personnel 可有 0 或 1 个 User）。"""
 
     __tablename__ = "sys_user"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    username: Mapped[str] = mapped_column(String(64), unique=True, index=True, comment="登录账号")
-    password_hash: Mapped[str] = mapped_column(String(255), comment="密码哈希")
-    real_name: Mapped[str | None] = mapped_column(String(32), comment="姓名")
-    employee_id: Mapped[int | None] = mapped_column(Integer, index=True, comment="关联人员 ID")
-    org_id: Mapped[int | None] = mapped_column(Integer, index=True, comment="所属组织 ID")
-    email: Mapped[str | None] = mapped_column(String(64), comment="邮箱")
-    phone: Mapped[str | None] = mapped_column(String(32), comment="手机号")
-    is_superuser: Mapped[bool] = mapped_column(Boolean, default=False, comment="是否超级管理员")
-    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, comment="是否启用")
-    approval_status: Mapped[str] = mapped_column(
-        String(16),
-        default=ApprovalStatus.APPROVED.value,
-        index=True,
-        comment="注册审批状态 PENDING/APPROVED/REJECTED（管理员与存量账号默认 APPROVED）",
+    id: Mapped[BigIntPk]
+    username: Mapped[CodeStr] = mapped_column(unique=True, comment="登录名")
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False, comment="密码哈希")
+    display_name: Mapped[NameStr] = mapped_column(comment="显示名")
+    personnel_id: Mapped[Optional[BigIntFk]] = mapped_column(
+        ForeignKey("sys_personnel.id", ondelete="RESTRICT"),
+        nullable=True,
+        unique=True,
+        comment="关联员工ID（1:1，可为空）",
     )
-    last_login_at: Mapped[datetime | None] = mapped_column(DateTime, comment="最后登录时间")
-    remark: Mapped[str | None] = mapped_column(String(255), comment="备注")
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=RecordStatus.ACTIVE.value, comment="状态"
+    )
+    last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, comment="最近登录时间")
+    remark: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="备注")
+
+    roles: Mapped[List["SysRole"]] = relationship(
+        secondary="sys_user_role", lazy="selectin"
+    )
+
+    __table_args__ = (
+        CheckConstraint("status IN ('ACTIVE','INACTIVE')", name="ck_sys_user_status"),
+    )
 
 
-class Role(TimestampMixin, Base):
-    """角色（Owner: system）。`data_scope` 即"访问范围"。"""
+class SysRole(Base, AuditMixin):
+    """角色（规格 §30：System Administrator / Sales User / Planner / Buyer / Warehouse User）。"""
 
     __tablename__ = "sys_role"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    code: Mapped[str] = mapped_column(String(32), unique=True, index=True, comment="角色编码")
-    name: Mapped[str] = mapped_column(String(32), comment="角色名称")
-    data_scope: Mapped[str] = mapped_column(
-        String(16), default=DataScope.ALL.value, comment="访问范围 ALL/ORG/ORG_AND_CHILD/SELF/CUSTOM"
+    id: Mapped[BigIntPk]
+    role_code: Mapped[CodeStr] = mapped_column(unique=True, comment="角色编码")
+    role_name: Mapped[NameStr] = mapped_column(comment="角色名称")
+    description: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, comment="描述")
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=RecordStatus.ACTIVE.value, comment="状态"
     )
-    sort_order: Mapped[int] = mapped_column(Integer, default=0, comment="排序")
-    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, comment="是否启用")
-    description: Mapped[str | None] = mapped_column(String(255), comment="描述")
+
+    permissions: Mapped[List["SysPermission"]] = relationship(
+        secondary="sys_role_permission", lazy="selectin"
+    )
+
+    __table_args__ = (
+        CheckConstraint("status IN ('ACTIVE','INACTIVE')", name="ck_sys_role_status"),
+    )
 
 
-class Permission(TimestampMixin, Base):
-    """权限资源（Owner: system）。菜单 / 按钮 / 接口统一用一棵资源树描述。"""
+class SysPermission(Base, AuditMixin):
+    """权限点：菜单 / 页面 / 关键操作（树形）。"""
 
     __tablename__ = "sys_permission"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    code: Mapped[str] = mapped_column(String(64), unique=True, index=True, comment="权限编码")
-    name: Mapped[str] = mapped_column(String(32), comment="权限名称")
-    perm_type: Mapped[str] = mapped_column(
-        String(16), default=PermissionType.MENU.value, comment="类型 MENU/BUTTON/API"
+    id: Mapped[BigIntPk]
+    perm_code: Mapped[CodeStr] = mapped_column(unique=True, comment="权限编码")
+    perm_name: Mapped[NameStr] = mapped_column(comment="权限名称")
+    perm_type: Mapped[str] = mapped_column(String(20), nullable=False, comment="权限类型")
+    parent_id: Mapped[Optional[BigIntFk]] = mapped_column(
+        ForeignKey("sys_permission.id", ondelete="RESTRICT"), nullable=True, index=True, comment="上级权限ID"
     )
-    parent_id: Mapped[int | None] = mapped_column(Integer, index=True, comment="上级权限 ID")
-    path: Mapped[str | None] = mapped_column(String(128), comment="前端路由 / 接口路径")
-    method: Mapped[str | None] = mapped_column(String(8), comment="HTTP 方法（perm_type=API 时）")
-    sort_order: Mapped[int] = mapped_column(Integer, default=0, comment="排序")
-    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, comment="是否启用")
+    path: Mapped[Optional[str]] = mapped_column(String(200), nullable=True, comment="前端路由/接口路径")
+    module: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, comment="所属模块")
+    sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="排序号")
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=RecordStatus.ACTIVE.value, comment="状态"
+    )
+
+    __table_args__ = (
+        CheckConstraint("perm_type IN ('MENU','PAGE','ACTION')", name="ck_sys_permission_type"),
+        CheckConstraint("status IN ('ACTIVE','INACTIVE')", name="ck_sys_permission_status"),
+    )
 
 
-class UserRole(Base):
-    """用户-角色关联（Owner: system）。"""
+class SysUserRole(Base):
+    """用户 N:M 角色 关联表（规格 §21，禁止把多个 ID 塞进 VARCHAR）。"""
 
     __tablename__ = "sys_user_role"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(Integer, index=True, comment="用户 ID")
-    role_id: Mapped[int] = mapped_column(Integer, index=True, comment="角色 ID")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+    id: Mapped[BigIntPk]
+    user_id: Mapped[BigIntFk] = mapped_column(
+        ForeignKey("sys_user.id", ondelete="CASCADE"), nullable=False, index=True, comment="用户ID"
+    )
+    role_id: Mapped[BigIntFk] = mapped_column(
+        ForeignKey("sys_role.id", ondelete="CASCADE"), nullable=False, index=True, comment="角色ID"
+    )
 
-    __table_args__ = (UniqueConstraint("user_id", "role_id", name="uq_user_role"),)
+    __table_args__ = (UniqueConstraint("user_id", "role_id", name="uq_sys_user_role"),)
 
 
-class RolePermission(Base):
-    """角色-权限关联（Owner: system）。"""
+class SysRolePermission(Base):
+    """角色 N:M 权限 关联表。"""
 
     __tablename__ = "sys_role_permission"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    role_id: Mapped[int] = mapped_column(Integer, index=True, comment="角色 ID")
-    permission_id: Mapped[int] = mapped_column(Integer, index=True, comment="权限 ID")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+    id: Mapped[BigIntPk]
+    role_id: Mapped[BigIntFk] = mapped_column(
+        ForeignKey("sys_role.id", ondelete="CASCADE"), nullable=False, index=True, comment="角色ID"
+    )
+    permission_id: Mapped[BigIntFk] = mapped_column(
+        ForeignKey("sys_permission.id", ondelete="CASCADE"), nullable=False, index=True, comment="权限ID"
+    )
 
-    __table_args__ = (UniqueConstraint("role_id", "permission_id", name="uq_role_permission"),)
+    __table_args__ = (
+        UniqueConstraint("role_id", "permission_id", name="uq_sys_role_permission"),
+    )
 
 
-# --------------------------------------------------------------------------- #
-# 六、系统操作日志管理
-# --------------------------------------------------------------------------- #
-class OperationLog(Base):
-    """操作日志（Owner: system）。只插入、不修改，查询接口只读。"""
+# ====================================================================
+# 字典
+# ====================================================================
+
+
+class SysDictionary(Base, AuditMixin):
+    """数据字典（计量单位、物料分类等基础枚举的可维护来源）。"""
+
+    __tablename__ = "sys_dictionary"
+
+    id: Mapped[BigIntPk]
+    dict_code: Mapped[CodeStr] = mapped_column(unique=True, comment="字典编码")
+    dict_name: Mapped[NameStr] = mapped_column(comment="字典名称")
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=RecordStatus.ACTIVE.value, comment="状态"
+    )
+    remark: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="备注")
+
+    items: Mapped[List["SysDictionaryItem"]] = relationship(
+        back_populates="dictionary", cascade="all, delete-orphan", lazy="selectin"
+    )
+
+    __table_args__ = (
+        CheckConstraint("status IN ('ACTIVE','INACTIVE')", name="ck_sys_dictionary_status"),
+    )
+
+
+class SysDictionaryItem(Base, AuditMixin):
+    """字典项。"""
+
+    __tablename__ = "sys_dictionary_item"
+
+    id: Mapped[BigIntPk]
+    dict_id: Mapped[BigIntFk] = mapped_column(
+        ForeignKey("sys_dictionary.id", ondelete="CASCADE"), nullable=False, index=True, comment="字典ID"
+    )
+    item_code: Mapped[CodeStr] = mapped_column(comment="字典项编码")
+    item_name: Mapped[NameStr] = mapped_column(comment="字典项名称")
+    item_value: Mapped[Optional[str]] = mapped_column(String(200), nullable=True, comment="字典项值")
+    sort_no: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="排序号")
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=RecordStatus.ACTIVE.value, comment="状态"
+    )
+
+    dictionary: Mapped[SysDictionary] = relationship(back_populates="items")
+
+    __table_args__ = (
+        UniqueConstraint("dict_id", "item_code", name="uq_sys_dictionary_item"),
+        CheckConstraint("status IN ('ACTIVE','INACTIVE')", name="ck_sys_dictionary_item_status"),
+    )
+
+
+# ====================================================================
+# 统一 Material Master（规格 §8）
+# ====================================================================
+
+
+class SysMaterial(Base, AuditMixin):
+    """**全系统唯一物料主表**。
+
+    - `material_type`: RAW / PURCHASED / SEMI / FINISHED
+    - `supply_type`: MAKE（自制）/ BUY（采购）—— 决定 MRP 结果分流方向
+    - `lead_time_days` / `safety_stock` 为 BOM 与 MRP 的必需字段（规格 §9）
+    """
+
+    __tablename__ = "sys_material"
+
+    id: Mapped[BigIntPk]
+    material_code: Mapped[CodeStr] = mapped_column(unique=True, comment="物料编码")
+    material_name: Mapped[NameStr] = mapped_column(comment="物料名称")
+    material_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, index=True, comment="物料类型 RAW/PURCHASED/SEMI/FINISHED"
+    )
+    supply_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, index=True, comment="供应类型 MAKE/BUY"
+    )
+    unit_code: Mapped[str] = mapped_column(String(20), nullable=False, default="PCS", comment="计量单位")
+    specification: Mapped[Optional[str]] = mapped_column(String(200), nullable=True, comment="规格型号")
+    material_group: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, comment="物料分组")
+    lead_time_days: Mapped[int] = mapped_column(Integer, nullable=False, default=0, comment="提前期（天）")
+    safety_stock: Mapped[Decimal] = mapped_column(
+        Numeric(18, 4), nullable=False, default=0, comment="安全库存"
+    )
+    standard_cost: Mapped[Decimal] = mapped_column(
+        Numeric(18, 2), nullable=False, default=0, comment="标准成本"
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=RecordStatus.ACTIVE.value, comment="状态"
+    )
+    remark: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="备注")
+
+    __table_args__ = (
+        CheckConstraint(
+            "material_type IN ('RAW','PURCHASED','SEMI','FINISHED')", name="ck_sys_material_type"
+        ),
+        CheckConstraint("supply_type IN ('MAKE','BUY')", name="ck_sys_material_supply_type"),
+        CheckConstraint("status IN ('ACTIVE','INACTIVE')", name="ck_sys_material_status"),
+        CheckConstraint("safety_stock >= 0", name="ck_sys_material_safety_stock"),
+        CheckConstraint("lead_time_days >= 0", name="ck_sys_material_lead_time"),
+    )
+
+
+# ====================================================================
+# BOM（规格 §9：必须正式支持提前期与版本，必须支持多层）
+# ====================================================================
+
+
+class SysBom(Base, AuditMixin):
+    """BOM 头：某物料在某个版本下的组成关系。`(material_id, bom_version)` 唯一。"""
+
+    __tablename__ = "sys_bom"
+
+    id: Mapped[BigIntPk]
+    bom_code: Mapped[CodeStr] = mapped_column(comment="BOM编码")
+    material_id: Mapped[BigIntFk] = mapped_column(
+        ForeignKey("sys_material.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+        comment="母件物料ID（sys_material.id）",
+    )
+    bom_version: Mapped[str] = mapped_column(String(20), nullable=False, default="V1.0", comment="BOM版本")
+    effective_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="生效日期")
+    expiry_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True, comment="失效日期")
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, comment="是否当前激活版本"
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=RecordStatus.ACTIVE.value, comment="状态"
+    )
+    remark: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="备注")
+
+    items: Mapped[List["SysBomItem"]] = relationship(
+        back_populates="bom", cascade="all, delete-orphan", lazy="selectin"
+    )
+
+    __table_args__ = (
+        UniqueConstraint("material_id", "bom_version", name="uq_sys_bom_material_version"),
+        CheckConstraint("status IN ('ACTIVE','INACTIVE')", name="ck_sys_bom_status"),
+    )
+
+
+class SysBomItem(Base, AuditMixin):
+    """BOM 子项：母件 → 子件，含数量与损耗率（支持多层展开）。"""
+
+    __tablename__ = "sys_bom_item"
+
+    id: Mapped[BigIntPk]
+    bom_id: Mapped[BigIntFk] = mapped_column(
+        ForeignKey("sys_bom.id", ondelete="CASCADE"), nullable=False, index=True, comment="BOM头ID"
+    )
+    material_id: Mapped[BigIntFk] = mapped_column(
+        ForeignKey("sys_material.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+        comment="子件物料ID（sys_material.id）",
+    )
+    quantity: Mapped[Decimal] = mapped_column(
+        Numeric(18, 4), nullable=False, default=1, comment="单位用量"
+    )
+    lead_time_offset: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="提前期偏置（天，相对父件需求时间的提前量）"
+    )
+    scrap_rate: Mapped[Decimal] = mapped_column(
+        Numeric(8, 4), nullable=False, default=0, comment="损耗率（0~1）"
+    )
+    sequence_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1, comment="序号")
+    remark: Mapped[Optional[str]] = mapped_column(String(200), nullable=True, comment="备注")
+
+    bom: Mapped[SysBom] = relationship(back_populates="items")
+
+    __table_args__ = (
+        UniqueConstraint("bom_id", "material_id", name="uq_sys_bom_item"),
+        CheckConstraint("quantity > 0", name="ck_sys_bom_item_qty"),
+        CheckConstraint("lead_time_offset >= 0", name="ck_sys_bom_item_lead_offset"),
+        CheckConstraint("scrap_rate >= 0 AND scrap_rate < 1", name="ck_sys_bom_item_scrap"),
+    )
+
+
+# ====================================================================
+# 工艺路线（Routing）
+# ====================================================================
+
+
+class SysRouting(Base, AuditMixin):
+    """工艺路线头：某自制件的加工工序集合。"""
+
+    __tablename__ = "sys_routing"
+
+    id: Mapped[BigIntPk]
+    routing_code: Mapped[CodeStr] = mapped_column(comment="工艺路线编码")
+    material_id: Mapped[BigIntFk] = mapped_column(
+        ForeignKey("sys_material.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+        comment="自制件物料ID（sys_material.id）",
+    )
+    routing_version: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="V1.0", comment="工艺版本"
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=RecordStatus.ACTIVE.value, comment="状态"
+    )
+    remark: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="备注")
+
+    operations: Mapped[List["SysRoutingOperation"]] = relationship(
+        back_populates="routing", cascade="all, delete-orphan", lazy="selectin"
+    )
+
+    __table_args__ = (
+        UniqueConstraint("material_id", "routing_version", name="uq_sys_routing_material_version"),
+        CheckConstraint("status IN ('ACTIVE','INACTIVE')", name="ck_sys_routing_status"),
+    )
+
+
+class SysRoutingOperation(Base, AuditMixin):
+    """工艺路线工序行。"""
+
+    __tablename__ = "sys_routing_operation"
+
+    id: Mapped[BigIntPk]
+    routing_id: Mapped[BigIntFk] = mapped_column(
+        ForeignKey("sys_routing.id", ondelete="CASCADE"), nullable=False, index=True, comment="工艺路线ID"
+    )
+    sequence_no: Mapped[int] = mapped_column(Integer, nullable=False, comment="工序顺序号")
+    operation_code: Mapped[CodeStr] = mapped_column(comment="工序编码")
+    operation_name: Mapped[NameStr] = mapped_column(comment="工序名称")
+    work_center: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, comment="工作中心")
+    setup_time: Mapped[Decimal] = mapped_column(
+        Numeric(18, 4), nullable=False, default=0, comment="准备工时（分钟）"
+    )
+    run_time: Mapped[Decimal] = mapped_column(
+        Numeric(18, 4), nullable=False, default=0, comment="单件加工工时（分钟）"
+    )
+    remark: Mapped[Optional[str]] = mapped_column(String(200), nullable=True, comment="备注")
+
+    routing: Mapped[SysRouting] = relationship(back_populates="operations")
+
+    __table_args__ = (
+        UniqueConstraint("routing_id", "sequence_no", name="uq_sys_routing_operation_seq"),
+        CheckConstraint("setup_time >= 0", name="ck_sys_routing_op_setup"),
+        CheckConstraint("run_time >= 0", name="ck_sys_routing_op_run"),
+    )
+
+
+# ====================================================================
+# 操作日志（规格 §24：重要业务动作写 sys_operation_log）
+# ====================================================================
+
+
+class SysOperationLog(Base):
+    """操作日志：记录关键业务动作，便于审计追踪。"""
 
     __tablename__ = "sys_operation_log"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[int | None] = mapped_column(Integer, index=True, comment="操作人 ID")
-    username: Mapped[str | None] = mapped_column(String(64), index=True, comment="操作人账号")
-    module: Mapped[str | None] = mapped_column(String(32), index=True, comment="所属模块")
-    action: Mapped[str] = mapped_column(String(16), default="OTHER", comment="动作类型")
-    description: Mapped[str | None] = mapped_column(String(128), comment="操作描述")
-    method: Mapped[str | None] = mapped_column(String(8), comment="HTTP 方法")
-    path: Mapped[str | None] = mapped_column(String(128), comment="请求路径")
-    ip: Mapped[str | None] = mapped_column(String(64), comment="客户端 IP")
-    request_params: Mapped[str | None] = mapped_column(Text, comment="请求参数（已脱敏）")
-    status: Mapped[str] = mapped_column(String(16), default="SUCCESS", comment="结果 SUCCESS/FAIL")
-    error_msg: Mapped[str | None] = mapped_column(Text, comment="错误信息")
-    duration_ms: Mapped[int | None] = mapped_column(Integer, comment="耗时（毫秒）")
+    id: Mapped[BigIntPk]
+    module: Mapped[str] = mapped_column(String(20), nullable=False, index=True, comment="模块标识")
+    action: Mapped[str] = mapped_column(String(50), nullable=False, comment="动作（CREATE/CONFIRM/...）")
+    target_type: Mapped[str] = mapped_column(String(50), nullable=False, comment="目标对象类型（表名）")
+    target_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, comment="目标对象ID")
+    operator_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, comment="操作人ID（sys_user.id）")
+    detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="详情")
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.now, nullable=False, index=True, comment="操作时间"
+        DateTime, nullable=False, default=datetime.now, comment="发生时间"
     )
