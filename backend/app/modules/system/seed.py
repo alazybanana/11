@@ -196,6 +196,9 @@ PERMISSION_SEEDS: list[dict[str, Any]] = [
 # 所有权限编码（供 ADMIN 全量授权使用）
 ALL_PERMISSION_CODES: list[str] = [item["code"] for item in PERMISSION_SEEDS]
 
+#: 注册页可选身份的角色编码（按展示顺序）
+REGISTER_ROLE_CODES: list[str] = [item["role_code"] for item in ROLE_SEEDS]
+
 # --------------------------------------------------------------------------- #
 # 三、角色-权限绑定（按五个模块的功能划分）
 # --------------------------------------------------------------------------- #

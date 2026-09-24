@@ -268,6 +268,11 @@ export function login(payload: { username: string; password: string }): Promise<
   return post<LoginResult>('/system/auth/login', payload)
 }
 
+/** 注册页可选的九种身份角色 */
+export function listRegisterRoles(): Promise<Role[]> {
+  return get<Role[]>('/system/auth/register-roles')
+}
+
 /** 注册账号：自选一种或多种身份（九种身份可复选） */
 export function register(payload: {
   username: string

@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from app.common.exceptions import BusinessException
 from app.modules.system import models, repository as repo
 from app.modules.system.contract import log_operation
+from app.modules.system.seed import REGISTER_ROLE_CODES
 from app.modules.system.schemas import (
     BomConfirmOut,
     BomCreate,
@@ -1311,6 +1312,11 @@ def set_user_roles(
 def list_roles(db: Session, status: Optional[str] = None) -> List[models.SysRole]:
     """返回角色列表。"""
     return repo.list_roles(db, status=status)
+
+
+def list_register_roles(db: Session) -> List[models.SysRole]:
+    """返回注册页可选的九种身份（按种子定义顺序，过滤库里其它角色）。"""
+    return repo.list_roles_by_codes(db, REGISTER_ROLE_CODES)
 
 
 def create_role(db: Session, payload: RoleCreate) -> models.SysRole:

@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 
-import { listRoles, register } from '@/api/system'
+import { listRegisterRoles, register } from '@/api/system'
 import type { Role } from '@/types/erp'
 
 const router = useRouter()
@@ -46,7 +46,7 @@ const rules: FormRules = {
 onMounted(async () => {
   rolesLoading.value = true
   try {
-    roleOptions.value = await listRoles()
+    roleOptions.value = await listRegisterRoles()
   } catch (error) {
     ElMessage.error((error as Error).message)
   } finally {

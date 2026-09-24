@@ -472,6 +472,17 @@ def get_role_by_code(db: Session, role_code: str) -> Optional[models.SysRole]:
     return db.scalar(select(models.SysRole).where(models.SysRole.role_code == role_code))
 
 
+def list_roles_by_codes(db: Session, role_codes: Sequence[str]) -> List[models.SysRole]:
+    """按编码集合取角色（保持传入顺序去重，不存在的不报错）。"""
+    rows = {
+        role.role_code: role
+        for role in db.scalars(
+            select(models.SysRole).where(models.SysRole.role_code.in_(list(role_codes)))
+        )
+    }
+    return [rows[code] for code in role_codes if code in rows]
+
+
 def add_role(db: Session, role: models.SysRole) -> models.SysRole:
     db.add(role)
     db.flush()
