@@ -332,6 +332,12 @@ def create_bom(db: Session, payload: BomCreate) -> models.SysBom:
     if repo.get_bom_by_material_version(db, payload.material_id, payload.bom_version):
         raise BusinessException(CODE_BOM_VERSION_EXISTS, "BOM 版本已存在")
     _validate_status(payload.status)
+    _require(
+        not (payload.effective_date and payload.expiry_date)
+        or payload.expiry_date >= payload.effective_date,
+        CODE_INVALID_PARAM,
+        "失效日期不能早于生效日期",
+    )
 
     bom = models.SysBom(
         bom_code=payload.bom_code or repo.next_no(db, models.SysBom, "BOM"),
@@ -339,7 +345,8 @@ def create_bom(db: Session, payload: BomCreate) -> models.SysBom:
         bom_version=payload.bom_version,
         effective_date=payload.effective_date,
         expiry_date=payload.expiry_date,
-        is_active=payload.is_active,
+        # 停用状态的 BOM 不可能同时是"当前激活版本"，与 change_bom_status 的口径保持一致
+        is_active=payload.is_active if payload.status == RecordStatus.ACTIVE.value else False,
         status=payload.status,
         remark=payload.remark,
     )
@@ -364,6 +371,10 @@ def create_bom(db: Session, payload: BomCreate) -> models.SysBom:
             ),
         )
 
+    # 保持"同一物料至多一个激活版本"不变量：新版本若以激活身份创建，旧版本自动让位
+    if bom.is_active:
+        repo.deactivate_other_boms(db, bom.material_id, bom.id)
+
     log_operation(
         db,
         module="system",
@@ -384,8 +395,20 @@ def update_bom(db: Session, bom_id: int, payload: BomUpdate) -> models.SysBom:
             raise BusinessException(CODE_BOM_VERSION_EXISTS, "BOM 版本已存在")
     if "status" in data:
         _validate_status(data["status"])
+    new_effective = data.get("effective_date", bom.effective_date)
+    new_expiry = data.get("expiry_date", bom.expiry_date)
+    _require(
+        not (new_effective and new_expiry) or new_expiry >= new_effective,
+        CODE_INVALID_PARAM,
+        "失效日期不能早于生效日期",
+    )
     for field, value in data.items():
         setattr(bom, field, value)
+    # 状态 / 激活位一致性：停用即取消激活；主动激活某个版本时，同物料其它版本全部让位
+    if bom.status == RecordStatus.INACTIVE.value:
+        bom.is_active = False
+    elif data.get("is_active"):
+        repo.deactivate_other_boms(db, bom.material_id, bom.id)
     log_operation(
         db,
         module="system",
