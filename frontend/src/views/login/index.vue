@@ -11,7 +11,10 @@ const route = useRoute()
 
 const formRef = ref<FormInstance>()
 const submitting = ref(false)
-const form = reactive({ username: '', password: '' })
+const form = reactive({
+  username: (route.query.username as string) || '',
+  password: '',
+})
 
 const rules: FormRules = {
   username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
@@ -57,11 +60,12 @@ async function submit(): Promise<void> {
 
       <el-divider />
 
-      <el-alert
-        type="info"
-        :closable="false"
-        title="无账号？请联系管理员在「系统管理 → 用户」中创建"
-      />
+      <div class="login-page__footer">
+        <span>没有账号？</span>
+        <router-link class="login-page__link" to="/register">去注册</router-link>
+        <span class="login-page__sep">|</span>
+        <span>请联系管理员在「系统管理 → 用户」中创建</span>
+      </div>
     </el-card>
   </div>
 </template>
@@ -86,5 +90,21 @@ async function submit(): Promise<void> {
 
 .login-page__button {
   width: 100%;
+}
+
+.login-page__footer {
+  text-align: center;
+  color: #909399;
+  font-size: 13px;
+}
+
+.login-page__link {
+  margin-left: 4px;
+  color: #409eff;
+  text-decoration: none;
+}
+
+.login-page__sep {
+  margin: 0 8px;
 }
 </style>

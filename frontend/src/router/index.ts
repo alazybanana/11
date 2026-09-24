@@ -24,16 +24,22 @@ router.afterEach((to) => {
  * 退出登录（头部「退出」按钮）清除该键即可。
  */
 const LOGIN_PATH = '/login'
+// 登录前可访问的公开页面（注册页不要求登录态）
+const PUBLIC_PATHS = new Set([LOGIN_PATH, '/register'])
 
 function isLoggedIn(): boolean {
   return Boolean(localStorage.getItem('bh-erp-user'))
 }
 
 router.beforeEach((to) => {
-  if (to.path === LOGIN_PATH) {
-    return isLoggedIn() ? { path: '/dashboard' } : undefined
+  if (!PUBLIC_PATHS.has(to.path)) {
+    return isLoggedIn() ? undefined : { path: LOGIN_PATH, query: { redirect: to.fullPath } }
   }
-  return isLoggedIn() ? undefined : { path: LOGIN_PATH, query: { redirect: to.fullPath } }
+  // 已登录访问登录页 → 回工作台（注册页不拦截）
+  if (to.path === LOGIN_PATH && isLoggedIn()) {
+    return { path: '/dashboard' }
+  }
+  return undefined
 })
 
 export default router

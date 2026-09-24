@@ -52,6 +52,7 @@ from app.modules.system.schemas import (
     PermissionUpdate,
     PersonnelCreate,
     PersonnelUpdate,
+    RegisterIn,
     RoutingCreate,
     RoutingOperationCreate,
     RoutingOperationUpdate,
@@ -1500,6 +1501,36 @@ def login(db: Session, username: str, password: str) -> Dict[str, object]:
         detail=f"用户 {user.username} 登录成功",
     )
     return {"user": user, "roles": roles, "permissions": permissions}
+
+
+def register(db: Session, payload: RegisterIn) -> models.SysUser:
+    """公开注册：创建 ACTIVE 账号并绑定所选身份角色（九种身份可复选）。"""
+    if repo.get_user_by_username(db, payload.username):
+        raise BusinessException(CODE_CODE_EXISTS, "登录名已存在")
+    role_ids = list(dict.fromkeys(int(i) for i in payload.role_ids))
+    for role_id in role_ids:
+        if not repo.get_role(db, role_id):
+            raise BusinessException(CODE_NOT_FOUND, f"身份角色不存在：{role_id}")
+
+    user = models.SysUser(
+        username=payload.username,
+        password_hash=_hash_password(payload.password),
+        display_name=payload.display_name,
+        status=RecordStatus.ACTIVE.value,
+    )
+    repo.add_user(db, user)
+    repo.replace_user_roles(db, user.id, role_ids)
+    db.flush()
+    repo.refresh(db, user)
+    log_operation(
+        db,
+        module="system",
+        action="REGISTER",
+        target_type="sys_user",
+        target_id=user.id,
+        detail=f"用户 {user.username} 注册，身份角色 {role_ids}",
+    )
+    return user
 
 
 # ==================== 操作日志 ====================

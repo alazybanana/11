@@ -14,6 +14,12 @@ export const constantRoutes: RouteRecordRaw[] = [
     component: () => import('@/views/login/index.vue'),
     meta: { title: '登录' },
   },
+  {
+    path: '/register',
+    name: 'Register',
+    component: () => import('@/views/register/index.vue'),
+    meta: { title: '注册' },
+  },
 
   // ---------- 登录后（主布局） ----------
   {

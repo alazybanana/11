@@ -262,10 +262,20 @@ export function updatePermission(id: number, payload: Record<string, unknown>): 
   return put<Permission>(`/system/permissions/${id}`, payload)
 }
 
-// ---------------- 登录 / 日志 ----------------
+// ---------------- 登录 / 注册 / 日志 ----------------
 
 export function login(payload: { username: string; password: string }): Promise<LoginResult> {
   return post<LoginResult>('/system/auth/login', payload)
+}
+
+/** 注册账号：自选一种或多种身份（九种身份可复选） */
+export function register(payload: {
+  username: string
+  password: string
+  display_name: string
+  role_ids: number[]
+}): Promise<User> {
+  return post<User>('/system/auth/register', payload)
 }
 
 export function listOperationLogs(params: Record<string, unknown> = {}): Promise<PageData<OperationLog>> {
