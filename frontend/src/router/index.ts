@@ -15,12 +15,25 @@ router.afterEach((to) => {
 })
 
 /**
- * 登录前 / 登录后路由结构已经建好：
- * - `/login` 位于主布局之外
- * - `/dashboard`、`/system`、`/sales`、`/planning`、`/procurement`、`/inventory` 位于主布局之内
+ * 登录路由守卫：以 localStorage 中是否存在登录结果（`bh-erp-user`）判定登录态。
  *
- * 真实的登录态校验请由 system 模块负责人通过 `router.beforeEach` 接入，
- * 本阶段**不实现任何鉴权逻辑**。
+ * - 未登录访问业务页 → 重定向 `/login` 并携带 redirect；
+ * - 已登录访问 `/login` → 回工作台。
+ *
+ * 后端登录为简化版（无 JWT），登录成功后由登录页把返回结果写入 `bh-erp-user`，
+ * 退出登录（头部「退出」按钮）清除该键即可。
  */
+const LOGIN_PATH = '/login'
+
+function isLoggedIn(): boolean {
+  return Boolean(localStorage.getItem('bh-erp-user'))
+}
+
+router.beforeEach((to) => {
+  if (to.path === LOGIN_PATH) {
+    return isLoggedIn() ? { path: '/dashboard' } : undefined
+  }
+  return isLoggedIn() ? undefined : { path: LOGIN_PATH, query: { redirect: to.fullPath } }
+})
 
 export default router
